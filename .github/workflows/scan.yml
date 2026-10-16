@@ -1,0 +1,38 @@
+name: Screener
+
+on:
+  schedule:
+    - cron: "15 22 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Programme installieren
+        run: pip install -r requirements.txt
+
+      - name: Aktienliste aktualisieren
+        run: python liste_erstellen.py || echo "Liste nicht aktualisiert, bestehende wird genutzt"
+
+      - name: Screener ausführen
+        run: python scan_index.py
+
+      - name: Ergebnis speichern
+        run: |
+          git config user.name "screener-bot"
+          git config user.email "screener-bot@users.noreply.github.com"
+          git add docs/ergebnis.json aktien.csv
+          git diff --cached --quiet || git commit -m "Tägliches Update"
+          git push
