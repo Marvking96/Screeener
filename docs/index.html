@@ -15,11 +15,11 @@
 <style>
 :root{
   --bg:#f4f5f7; --card:#ffffff; --text:#14161a; --muted:#6a7280; --line:#e2e5ea;
-  --long:#12935f; --short:#d6384a; --accent:#2b6df0; --chip:#e9ecf1; --chart:#4b5563;
+  --long:#12935f; --short:#d6384a; --accent:#2b6df0; --chip:#e9ecf1; --chart:#4b5563; --warn:#b26a00;
 }
 @media (prefers-color-scheme: dark){
   :root{ --bg:#0f1115; --card:#181b21; --text:#eceef2; --muted:#8b93a1; --line:#272b33;
-    --long:#2ecc8f; --short:#ff5d6e; --accent:#6c9bff; --chip:#222630; --chart:#aab2c0; }
+    --long:#2ecc8f; --short:#ff5d6e; --accent:#6c9bff; --chip:#222630; --chart:#aab2c0; --warn:#ffb454; }
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
@@ -49,6 +49,7 @@ input[type=search]{width:100%;font:inherit;padding:10px 12px;border-radius:10px;
 .right{text-align:right;font-size:13px;color:var(--muted);white-space:nowrap}
 .badge{display:inline-block;font-size:12px;font-weight:700;padding:1px 8px;border-radius:999px;margin-right:6px}
 .badge.long{color:var(--long);background:color-mix(in srgb,var(--long) 16%,transparent)}
+.badge.alt{color:var(--warn);background:color-mix(in srgb,var(--warn) 18%,transparent);margin:0 0 0 6px}
 .badge.short{color:var(--short);background:color-mix(in srgb,var(--short) 16%,transparent)}
 .detail{display:none;padding:0 14px 14px}
 .card.open .detail{display:block}
@@ -172,7 +173,9 @@ function karte(e, art) {
     el("div", {class: "name", text: e.name}),
     rechts,
     el("div", {class: "meta"}, el("span", {class: "badge " + e.richtung, text: long ? "Long" : "Short"}),
-      document.createTextNode(e.kuerzel + " · " + e.index)),
+      document.createTextNode(e.kuerzel + " · " + e.index),
+      (e.stand && state.daten.letzter_handelstag && e.stand < state.daten.letzter_handelstag)
+        ? el("span", {class: "badge alt", text: "Daten vom " + kurzDatum(e.stand)}) : null),
     el("div", {class: "right", text: ""}));
   const unterzeile = el("div", {class: "meta", text: unten, style: "grid-column:1 / -1"});
   kopf.append(unterzeile);
@@ -254,13 +257,21 @@ async function start() {
   const erstellt = new Date(d.erstellt);
   document.getElementById("sub").textContent = "Stand: " + (d.letzter_handelstag ? datumDE(d.letzter_handelstag) : "?") +
     " · " + d.anzahl_geprueft + " von " + d.anzahl_gesamt + " Aktien geprüft";
+  if (d.veraltet && d.veraltet.length) {
+    const eine = d.veraltet.length === 1;
+    document.getElementById("warn").append(el("div", {class: "warn",
+      text: (eine ? "Bei 1 Aktie fehlt" : "Bei " + d.veraltet.length + " Aktien fehlt") +
+        " der letzte Handelstag in der Datenquelle (Feiertag oder Verzögerung). " +
+        (eine ? "Sie ist" : "Sie sind") + " mit \"Daten vom ...\" markiert und nicht ganz aktuell."}));
+  }
   const alterTage = (Date.now() - erstellt.getTime()) / 86400000;
   if (alterTage > 4) {
     document.getElementById("warn").append(el("div", {class: "warn",
       text: "Die Daten sind " + Math.floor(alterTage) + " Tage alt. Der automatische Lauf scheint nicht mehr zu funktionieren."}));
   }
   document.getElementById("fuss").textContent = "Berechnet " + erstellt.toLocaleString("de-DE", {dateStyle: "short", timeStyle: "short"}) +
-    " aus Schlusskursen von Yahoo Finance (Fenster N=" + d.einstellungen.N + "). Keine Anlageberatung.";
+    " aus Schlusskursen der Heimatbörse laut Yahoo Finance (Fenster N=" + d.einstellungen.N + "). " +
+    "Kurse bei Trade Republic können um Bruchteile eines Prozents abweichen, weil dort bis spät abends gehandelt wird. Keine Anlageberatung.";
   filterLeiste();
   zeichne();
 }
