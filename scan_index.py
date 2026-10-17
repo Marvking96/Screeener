@@ -16,6 +16,7 @@ MAX_ALTER_TAGE = 5     # Signale, die älter sind (in Handelstagen), werden nich
 MAX_ABSTAND_PROZENT = 5  # aktive Setups werden nur gezeigt, wenn der Kurs höchstens so weit vom Ausbruch entfernt ist
 BLOCK = 100            # so viele Aktien werden pro Abruf geladen
 KURS_TAGE = 160        # so viele Handelstage Kursverlauf bekommt jeder Treffer für den Chart in der App
+MAX_NACHLADEN = 150    # so viele Aktien mit fehlendem letzten Handelstag werden einzeln nachgeladen
 # -------------------------------------------------------------
 
 
@@ -173,6 +174,7 @@ def baue_eintrag(ticker, name, index_name, close, t):
     daten = [d.strftime("%Y-%m-%d") for d in fenster.index]
     eintrag = {
         "kuerzel": ticker, "name": name, "index": index_name, "richtung": t["richtung"],
+        "stand": close.index[-1].strftime("%Y-%m-%d"),
         "punkt2": round(t["punkt2"], 2), "punkt3": round(t["punkt3"], 2), "kurs": round(t["kurs"], 2),
         "kurse": {"d": daten, "c": [round(float(x), 3) for x in fenster.values]},
         "kette": [{"d": close.index[i].strftime("%Y-%m-%d"), "nr": nr, "c": round(float(close.iloc[i]), 3)}
@@ -214,19 +216,13 @@ def zeige_tabelle(eintraege, art):
     print(pd.DataFrame(zeilen).to_string(index=False))
 
 
-def main():
-    start = time.time()
-    liste = pd.read_csv(LISTE, sep=";", encoding="utf-8-sig")
-    tickers = list(liste["Kürzel"])
-    namen = dict(zip(liste["Kürzel"], liste["Name"]))
-    indizes = dict(zip(liste["Kürzel"], liste["Index"]))
-    print(f"{len(tickers)} Aktien in {LISTE}. Lade Kurse in Blöcken zu {BLOCK} ...")
-
-    signale, setups, ohne_daten, letzte_tage = [], [], [], []
+def lade_serien(tickers):
+    """Lädt alle Kurse blockweise. Gibt die Kursreihen je Aktie und die Aktien ohne Daten zurück."""
+    serien, ohne_daten = {}, []
+    gesamt = (len(tickers) + BLOCK - 1) // BLOCK
     for b in range(0, len(tickers), BLOCK):
         block = tickers[b : b + BLOCK]
         nr = b // BLOCK + 1
-        gesamt = (len(tickers) + BLOCK - 1) // BLOCK
         try:
             kurse = lade_block(block)
         except Exception as fehler:
@@ -241,17 +237,67 @@ def main():
             if len(close) < 40:
                 ohne_daten.append(ticker)
                 continue
-            try:
-                treffer = pruefe_aktie(close)
-            except Exception as fehler:
-                print(f"  Fehler bei {ticker}: {fehler}")
-                ohne_daten.append(ticker)
-                continue
-            letzte_tage.append(close.index[-1].strftime("%Y-%m-%d"))
-            for t in treffer:
-                eintrag = baue_eintrag(ticker, str(namen.get(ticker, "-")), indizes.get(ticker, "-"), close, t)
-                (signale if t["art"] == "signal" else setups).append(eintrag)
+            serien[ticker] = close
         print(f"  Block {nr}/{gesamt} fertig")
+    return serien, ohne_daten
+
+
+def referenzdatum(serien):
+    """Der neueste Handelstag, den die Datenquelle für mindestens 10 Aktien liefert."""
+    zaehler = Counter(s.index[-1] for s in serien.values())
+    kandidaten = [d for d, n in zaehler.items() if n >= min(10, len(serien))]
+    return max(kandidaten) if kandidaten else None
+
+
+def hole_nach(serien, ref):
+    """Lädt Aktien, denen der neueste Handelstag fehlt, einzeln nach.
+    Gibt die Aktien zurück, die danach immer noch einen älteren Datenstand haben."""
+    veraltet = [t for t, s in serien.items() if s.index[-1] < ref]
+    if not veraltet:
+        return []
+    print(f"\n{len(veraltet)} Aktien haben nicht den neuesten Handelstag ({ref:%d.%m.%Y}).")
+    if len(veraltet) > MAX_NACHLADEN:
+        print("  Zu viele für einen Einzelabruf (vermutlich Feiertag an einer Börse). Sie werden markiert.")
+        return veraltet
+    for t in veraltet:
+        for versuch in range(2):
+            try:
+                neu = lade_block([t])[t].dropna()
+                if len(neu) >= 40 and neu.index[-1] > serien[t].index[-1]:
+                    serien[t] = neu
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        time.sleep(0.3)
+    rest = [t for t, s in serien.items() if s.index[-1] < ref]
+    print(f"  Nachgeladen: {len(veraltet) - len(rest)}, weiterhin mit älterem Datenstand: {len(rest)}")
+    return rest
+
+
+def main():
+    start = time.time()
+    liste = pd.read_csv(LISTE, sep=";", encoding="utf-8-sig")
+    tickers = list(liste["Kürzel"])
+    namen = dict(zip(liste["Kürzel"], liste["Name"]))
+    indizes = dict(zip(liste["Kürzel"], liste["Index"]))
+    print(f"{len(tickers)} Aktien in {LISTE}. Lade Kurse in Blöcken zu {BLOCK} ...")
+
+    serien, ohne_daten = lade_serien(tickers)
+    ref = referenzdatum(serien)
+    veraltet = hole_nach(serien, ref) if ref is not None else []
+
+    signale, setups = [], []
+    for ticker, close in serien.items():
+        try:
+            treffer = pruefe_aktie(close)
+        except Exception as fehler:
+            print(f"  Fehler bei {ticker}: {fehler}")
+            ohne_daten.append(ticker)
+            continue
+        for t in treffer:
+            eintrag = baue_eintrag(ticker, str(namen.get(ticker, "-")), indizes.get(ticker, "-"), close, t)
+            (signale if t["art"] == "signal" else setups).append(eintrag)
 
     geprueft = len(tickers) - len(ohne_daten)
     if geprueft < len(tickers) * 0.5:
@@ -264,9 +310,10 @@ def main():
     setups.sort(key=lambda e: e["abstand"])
     ergebnis = {
         "erstellt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "letzter_handelstag": Counter(letzte_tage).most_common(1)[0][0] if letzte_tage else None,
+        "letzter_handelstag": ref.strftime("%Y-%m-%d") if ref is not None else None,
         "anzahl_gesamt": len(tickers), "anzahl_geprueft": geprueft,
         "einstellungen": {"N": N, "max_alter_tage": MAX_ALTER_TAGE, "max_abstand_prozent": MAX_ABSTAND_PROZENT},
+        "veraltet": veraltet,
         "ohne_daten": ohne_daten,
         "signale": signale, "setups": setups,
     }
@@ -280,6 +327,9 @@ def main():
     zeige_tabelle(signale, "signal")
     print(f"\n=== AKTIVE SETUPS (1-2-3 steht, Ausbruch fehlt noch, höchstens {MAX_ABSTAND_PROZENT}% entfernt), nächste zuerst ===")
     zeige_tabelle(setups, "setup")
+    if veraltet:
+        print(f"\nHINWEIS: {len(veraltet)} Aktien haben einen älteren Datenstand als {ref:%d.%m.%Y}: "
+              + ", ".join(veraltet[:20]) + (" ..." if len(veraltet) > 20 else ""))
     if ohne_daten:
         print(f"\nOhne ausreichende Daten ({len(ohne_daten)}): " + ", ".join(ohne_daten[:40]) + (" ..." if len(ohne_daten) > 40 else ""))
 
