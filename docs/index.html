@@ -15,11 +15,11 @@
 <style>
 :root{
   --bg:#f4f5f7; --card:#ffffff; --text:#14161a; --muted:#6a7280; --line:#e2e5ea;
-  --long:#12935f; --short:#d6384a; --accent:#2b6df0; --chip:#e9ecf1; --chart:#4b5563; --warn:#b26a00;
+  --long:#12935f; --short:#d6384a; --accent:#2b6df0; --chip:#e9ecf1; --chart:#4b5563; --warn:#b26a00; --gold:#e0a000;
 }
 @media (prefers-color-scheme: dark){
   :root{ --bg:#0f1115; --card:#181b21; --text:#eceef2; --muted:#8b93a1; --line:#272b33;
-    --long:#2ecc8f; --short:#ff5d6e; --accent:#6c9bff; --chip:#222630; --chart:#aab2c0; --warn:#ffb454; }
+    --long:#2ecc8f; --short:#ff5d6e; --accent:#6c9bff; --chip:#222630; --chart:#aab2c0; --warn:#ffb454; --gold:#ffc233; }
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
@@ -32,18 +32,24 @@ h1{font-size:22px;margin:8px 0 2px;letter-spacing:-.01em}
 .warn{background:#ff9f1c22;border:1px solid #ff9f1c88;border-radius:10px;padding:10px 12px;
   font-size:14px;margin:0 0 12px}
 .tabs{display:flex;background:var(--chip);border-radius:12px;padding:3px;margin-bottom:12px}
-.tabs button{flex:1;border:0;background:none;color:var(--muted);font:inherit;font-weight:600;
+.tabs button{flex:1;border:0;background:none;color:var(--muted);font:inherit;font-size:15px;font-weight:600;
   padding:9px 0;border-radius:9px;cursor:pointer}
 .tabs button[aria-selected="true"]{background:var(--card);color:var(--text);box-shadow:0 1px 3px #0003}
-.filters{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.filters{margin-bottom:10px}
+.filters .row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
 .chip{border:1px solid var(--line);background:var(--card);color:var(--muted);font:inherit;font-size:13px;
   padding:5px 11px;border-radius:999px;cursor:pointer}
-.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:650}
 input[type=search]{width:100%;font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--line);
   background:var(--card);color:var(--text);margin-bottom:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;margin-bottom:10px;overflow:hidden}
-.head{width:100%;text-align:left;border:0;background:none;color:inherit;font:inherit;padding:12px 14px;cursor:pointer;
+.top{display:flex;align-items:flex-start}
+.head,.plain{flex:1;min-width:0;text-align:left;border:0;background:none;color:inherit;font:inherit;padding:12px 4px 12px 14px;
   display:grid;grid-template-columns:1fr auto;gap:2px 10px}
+.head{cursor:pointer}
+.star{border:0;background:none;font-size:24px;line-height:1;padding:11px 14px 11px 8px;cursor:pointer;color:var(--muted)}
+.star[aria-pressed="true"]{color:var(--gold)}
+.pos{color:var(--long)} .neg{color:var(--short)}
 .name{font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .meta{color:var(--muted);font-size:13px}
 .right{text-align:right;font-size:13px;color:var(--muted);white-space:nowrap}
@@ -57,6 +63,9 @@ input[type=search]{width:100%;font:inherit;padding:10px 12px;border-radius:10px;
 .facts div{background:var(--chip);border-radius:10px;padding:7px 9px}
 .facts b{display:block;font-size:15px}
 .facts span{color:var(--muted);font-size:12px}
+.ctrl{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 8px;align-items:center}
+.ctrl .chip{font-size:12px;padding:4px 10px}
+.ctrl .sep{width:1px;align-self:stretch;background:var(--line);margin:0 2px}
 svg{width:100%;height:auto;display:block}
 .hint{color:var(--muted);font-size:12px;margin:6px 0 0}
 .empty{color:var(--muted);text-align:center;padding:36px 12px}
@@ -71,6 +80,7 @@ footer{color:var(--muted);font-size:12px;padding:14px 4px 28px}
   <div class="tabs" role="tablist">
     <button role="tab" id="tab-signale" aria-selected="true">Signale</button>
     <button role="tab" id="tab-setups" aria-selected="false">Setups</button>
+    <button role="tab" id="tab-merkliste" aria-selected="false">Watchlist</button>
   </div>
   <div class="filters" id="filters"></div>
   <input type="search" id="suche" placeholder="Name oder Kürzel suchen" autocomplete="off">
@@ -81,7 +91,18 @@ footer{color:var(--muted);font-size:12px;padding:14px 4px 28px}
 "use strict";
 const SVGNS = "http://www.w3.org/2000/svg";
 const zahl = new Intl.NumberFormat("de-DE", {minimumFractionDigits: 2, maximumFractionDigits: 2});
-const state = {daten: null, tab: "signale", richtung: "alle", index: "alle", suche: "", offen: null};
+const speicher = {
+  lies(k, std) { try { const v = localStorage.getItem(k); return v == null ? std : JSON.parse(v); } catch (_) { return std; } },
+  schreib(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} }
+};
+const state = {
+  daten: null, tab: "signale", richtung: "alle", index: "alle", suche: "", offen: null,
+  ansicht: speicher.lies("ansicht", "kerzen"),       // "kerzen" oder "linie"
+  zeitraum: speicher.lies("zeitraum", "auto"),       // "auto", "3m" oder "alles"
+  merkliste: speicher.lies("merkliste", []),         // Liste von Kürzeln
+  alle: new Map()
+};
+if (!Array.isArray(state.merkliste)) state.merkliste = [];
 
 function el(tag, attrs, ...kinder) {
   const e = document.createElement(tag);
@@ -100,19 +121,60 @@ function sv(tag, attrs, text) {
 const datumDE = iso => { const [y, m, d] = iso.split("-"); return d + "." + m + "." + y; };
 const kurzDatum = iso => { const [, m, d] = iso.split("-"); return d + "." + m + "."; };
 const handelstage = n => n === 0 ? "am letzten Handelstag" : n === 1 ? "1 Handelstag her" : n + " Handelstage her";
+const prozent = v => (v > 0 ? "+" : "") + zahl.format(v) + " %";
+
+/* ---------- Watchlist ---------- */
+const istMerk = k => state.merkliste.includes(k);
+function merkeUm(k) {
+  const i = state.merkliste.indexOf(k);
+  if (i >= 0) state.merkliste.splice(i, 1); else state.merkliste.push(k);
+  speicher.schreib("merkliste", state.merkliste);
+  return istMerk(k);
+}
+function stern(k) {
+  const b = el("button", {class: "star", type: "button"});
+  const setze = () => {
+    const an = istMerk(k);
+    b.textContent = an ? "★" : "☆";
+    b.setAttribute("aria-pressed", String(an));
+    b.setAttribute("aria-label", an ? "Aus der Watchlist entfernen" : "Zur Watchlist hinzufügen");
+  };
+  setze();
+  b.addEventListener("click", () => {
+    merkeUm(k); setze();
+    if (state.tab === "merkliste") zeichne(); else tabBeschriftung();
+  });
+  return b;
+}
+
+/* ---------- Chart (Kerzen oder Linie) ---------- */
+function fensterGroesse(e, gesamt) {
+  if (state.zeitraum === "alles") return gesamt;
+  if (state.zeitraum === "3m") return Math.min(63, gesamt);
+  // auto: die ganze 1-2-3-Kette sichtbar, mindestens 3 Monate
+  let aelteste = gesamt;
+  e.kette.forEach(p => { const i = e.kurse.d.indexOf(p.d); if (i >= 0 && i < aelteste) aelteste = i; });
+  return Math.min(gesamt, Math.max(63, gesamt - aelteste + 8));
+}
 
 function chart(e) {
-  const W = 360, H = 220, pl = 8, pr = 58, pt = 18, pb = 24;
-  const c = e.kurse.c, d = e.kurse.d, n = c.length;
+  const W = 360, H = 240, pl = 8, pr = 58, pt = 14, pb = 24;
+  const K = e.kurse, gesamt = K.c.length;
+  const kerzen = state.ansicht === "kerzen" && !!(K.o && K.h && K.l);
+  const s0 = gesamt - fensterGroesse(e, gesamt);
+  const d = K.d.slice(s0), c = K.c.slice(s0);
+  const o = kerzen ? K.o.slice(s0) : c, h = kerzen ? K.h.slice(s0) : c, l = kerzen ? K.l.slice(s0) : c;
+  const n = c.length;
   const long = e.richtung === "long";
   const farbe = long ? "var(--long)" : "var(--short)";
-  const alle = c.concat([e.punkt2, e.punkt3]);
+  const alle = h.concat(l, [e.punkt2, e.punkt3]);
   let lo = Math.min(...alle), hi = Math.max(...alle);
-  const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
-  const x = i => pl + (W - pl - pr) * (n <= 1 ? 0 : i / (n - 1));
+  const pad = (hi - lo) * 0.14 || 1; lo -= pad; hi += pad;
+  const pitch = (W - pl - pr) / n;
+  const x = i => pl + pitch * (i + 0.5);
   const y = v => pt + (H - pt - pb) * (1 - (v - lo) / (hi - lo));
   const s = sv("svg", {viewBox: "0 0 " + W + " " + H, role: "img",
-    "aria-label": "Kursverlauf " + e.name + " mit den Punkten 1, 2 und 3"});
+    "aria-label": (kerzen ? "Kerzenchart " : "Kursverlauf ") + e.name + " mit den Punkten 1, 2 und 3"});
   // Hilfslinien für Punkt 2 und Punkt 3
   [[e.punkt2, farbe], [e.punkt3, "var(--muted)"]].forEach(([wert, col]) => {
     s.append(sv("line", {x1: pl, x2: W - pr, y1: y(wert), y2: y(wert), stroke: col, "stroke-width": 1,
@@ -131,25 +193,37 @@ function chart(e) {
     for (let k = beschr.length - 2; k >= 0; k--) if (beschr[k + 1].y - beschr[k].y < 13) beschr[k].y = beschr[k + 1].y - 13;
   }
   beschr.forEach(b => s.append(sv("text", {x: W - pr + 4, y: b.y, fill: b.col, "font-size": 11, "font-weight": b.fett}, b.text)));
-  // Kurslinie
-  const pts = c.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
-  s.append(sv("polyline", {points: pts, fill: "none", stroke: "var(--chart)", "stroke-width": 1.6,
-    "stroke-linejoin": "round", "stroke-linecap": "round"}));
-  // aktueller Kurs
-  s.append(sv("circle", {cx: x(n - 1), cy: y(c[n - 1]), r: 3, fill: "var(--accent)"}));
-  // Punkte 1-2-3
+  if (kerzen) {
+    const bw = Math.max(1.2, Math.min(8, pitch * 0.68));
+    for (let i = 0; i < n; i++) {
+      const col = c[i] >= o[i] ? "var(--long)" : "var(--short)";
+      const cx = x(i);
+      s.append(sv("line", {x1: cx, x2: cx, y1: y(h[i]), y2: y(l[i]), stroke: col, "stroke-width": pitch < 3 ? 0.8 : 1}));
+      const oben = y(Math.max(o[i], c[i])), hoehe = Math.max(1, y(Math.min(o[i], c[i])) - oben);
+      s.append(sv("rect", {x: cx - bw / 2, y: oben, width: bw, height: hoehe, fill: col}));
+    }
+    // aktueller Schlusskurs als feine Linie
+    s.append(sv("line", {x1: x(n - 1), x2: W - pr, y1: y(c[n - 1]), y2: y(c[n - 1]), stroke: "var(--accent)", "stroke-width": 1}));
+  } else {
+    const pts = c.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
+    s.append(sv("polyline", {points: pts, fill: "none", stroke: "var(--chart)", "stroke-width": 1.6,
+      "stroke-linejoin": "round", "stroke-linecap": "round"}));
+    s.append(sv("circle", {cx: x(n - 1), cy: y(c[n - 1]), r: 3, fill: "var(--accent)"}));
+  }
+  // Punkte 1-2-3 (nach Schlusskurs; Nummer außerhalb der Kerze)
   for (const p of e.kette) {
     const i = d.indexOf(p.d); if (i < 0) continue;
     const hoch = long ? p.nr === 2 : p.nr !== 2;
-    const cx = x(i), cy = y(p.c), oy = hoch ? -13 : 13;
-    s.append(sv("circle", {cx: cx, cy: cy, r: 2.5, fill: farbe}));
-    s.append(sv("circle", {cx: cx, cy: cy + oy, r: 8, fill: farbe}));
-    s.append(sv("text", {x: cx, y: cy + oy + 4, "text-anchor": "middle", fill: "#fff", "font-size": 11, "font-weight": 700}, String(p.nr)));
+    const cx = x(i), cy = y(p.c);
+    const oy = (hoch ? y(h[i]) - 13 : y(l[i]) + 13);
+    s.append(sv("circle", {cx: cx, cy: cy, r: 2.6, fill: farbe, stroke: "var(--card)", "stroke-width": 1}));
+    s.append(sv("circle", {cx: cx, cy: oy, r: 8, fill: farbe}));
+    s.append(sv("text", {x: cx, y: oy + 4, "text-anchor": "middle", fill: "#fff", "font-size": 11, "font-weight": 700}, String(p.nr)));
   }
   // Ausbruchstag
   if (e.signaltag) {
     const i = d.indexOf(e.signaltag);
-    if (i >= 0) s.append(sv("text", {x: x(i), y: y(c[i]) + (long ? -6 : 14), "text-anchor": "middle",
+    if (i >= 0) s.append(sv("text", {x: x(i), y: long ? y(h[i]) - 6 : y(l[i]) + 17, "text-anchor": "middle",
       fill: "var(--accent)", "font-size": 16}, "★"));
   }
   // Datumsachse
@@ -160,28 +234,33 @@ function chart(e) {
   return s;
 }
 
+/* ---------- Karten ---------- */
+function badgeAlt(e) {
+  return (e.stand && state.daten.letzter_handelstag && e.stand < state.daten.letzter_handelstag)
+    ? el("span", {class: "badge alt", text: "Daten vom " + kurzDatum(e.stand)}) : null;
+}
+
 function karte(e, art) {
   const long = e.richtung === "long";
-  const offen = state.offen === art + e.kuerzel + e.richtung;
+  const schluessel = art + e.kuerzel + e.richtung;
+  const offen = state.offen === schluessel;
   const rechts = art === "signale"
     ? el("div", {class: "right"}, handelstage(e.tage_her))
     : el("div", {class: "right"}, "noch " + zahl.format(e.abstand) + " %");
   const unten = art === "signale"
     ? "Ausbruch " + (long ? "über " : "unter ") + zahl.format(e.punkt2) + " · Kurs " + zahl.format(e.kurs)
     : "Ausbruch bei " + zahl.format(e.punkt2) + " · Kurs " + zahl.format(e.kurs);
-  const kopf = el("button", {class: "head", "aria-expanded": String(offen)},
+  const kopf = el("button", {class: "head", type: "button", "aria-expanded": String(offen)},
     el("div", {class: "name", text: e.name}),
     rechts,
     el("div", {class: "meta"}, el("span", {class: "badge " + e.richtung, text: long ? "Long" : "Short"}),
-      document.createTextNode(e.kuerzel + " · " + e.index),
-      (e.stand && state.daten.letzter_handelstag && e.stand < state.daten.letzter_handelstag)
-        ? el("span", {class: "badge alt", text: "Daten vom " + kurzDatum(e.stand)}) : null),
+      document.createTextNode(e.kuerzel + " · " + e.index), badgeAlt(e)),
     el("div", {class: "right", text: ""}));
-  const unterzeile = el("div", {class: "meta", text: unten, style: "grid-column:1 / -1"});
-  kopf.append(unterzeile);
-  const k = el("div", {class: "card" + (offen ? " open" : "")}, kopf);
+  kopf.append(el("div", {class: "meta", text: unten, style: "grid-column:1 / -1"}));
+  const k = el("div", {class: "card" + (offen ? " open" : "")}, el("div", {class: "top"}, kopf, stern(e.kuerzel)));
   const detail = el("div", {class: "detail"});
   k.append(detail);
+  const hatKerzen = !!(e.kurse.o && e.kurse.h && e.kurse.l);
   const fuellen = () => {
     detail.replaceChildren();
     const fakten = el("div", {class: "facts"},
@@ -189,58 +268,123 @@ function karte(e, art) {
       el("div", {}, el("b", {text: zahl.format(e.punkt3)}), el("span", {text: "Punkt 3"})),
       el("div", {}, el("b", {text: art === "signale" ? datumDE(e.signaltag) : zahl.format(e.abstand) + " %"}),
         el("span", {text: art === "signale" ? "Ausbruchstag" : "bis zum Ausbruch"})));
-    detail.append(fakten, chart(e),
-      el("p", {class: "hint", text: "Schlusskurse, letzte " + e.kurse.c.length + " Handelstage. Zahlen = 1-2-3-Punkte" +
-        (art === "signale" ? ", Stern = Ausbruch." : ".")}));
+    const ctrl = el("div", {class: "ctrl"});
+    const knopf = (text, gruppe, wert) => {
+      const b = el("button", {class: "chip", type: "button", text: text, "aria-pressed": String(state[gruppe] === wert)});
+      b.addEventListener("click", () => { state[gruppe] = wert; speicher.schreib(gruppe, wert); fuellen(); });
+      return b;
+    };
+    if (hatKerzen) { ctrl.append(knopf("Kerzen", "ansicht", "kerzen"), knopf("Linie", "ansicht", "linie"), el("span", {class: "sep"})); }
+    ctrl.append(knopf("Auto", "zeitraum", "auto"), knopf("3 Monate", "zeitraum", "3m"), knopf("Alles", "zeitraum", "alles"));
+    const kerzenModus = hatKerzen && state.ansicht === "kerzen";
+    detail.append(fakten, ctrl, chart(e),
+      el("p", {class: "hint", text: (kerzenModus ? "Tageskerzen (grün = Schluss über Eröffnung). " : "Schlusskurse. ") +
+        "Zahlen = 1-2-3-Punkte, bestimmt nach Schlusskurs" + (art === "signale" ? ". Stern = Ausbruch." : ".")}));
   };
   if (offen) fuellen();
   kopf.addEventListener("click", () => {
-    const schluessel = art + e.kuerzel + e.richtung;
     const warOffen = k.classList.contains("open");
-    document.querySelectorAll(".card.open").forEach(x => { x.classList.remove("open"); x.firstChild.setAttribute("aria-expanded", "false"); });
+    document.querySelectorAll(".card.open").forEach(x => {
+      x.classList.remove("open"); x.querySelector(".head").setAttribute("aria-expanded", "false");
+    });
     if (!warOffen) { fuellen(); k.classList.add("open"); kopf.setAttribute("aria-expanded", "true"); state.offen = schluessel; }
     else state.offen = null;
   });
   return k;
 }
 
+// einfache Karte für Aktien ohne aktuelles Signal/Setup (Suche und Watchlist)
+function einfacheKarte(a) {
+  const treffer = [];
+  state.daten.signale.forEach(x => { if (x.kuerzel === a.kuerzel) treffer.push({r: x.richtung, t: "Signal"}); });
+  state.daten.setups.forEach(x => { if (x.kuerzel === a.kuerzel) treffer.push({r: x.richtung, t: "Setup"}); });
+  const meta = el("div", {class: "meta"});
+  treffer.forEach(t => meta.append(el("span", {class: "badge " + t.r, text: t.t + (t.r === "long" ? " Long" : " Short")})));
+  meta.append(document.createTextNode(a.kuerzel + (a.index ? " · " + a.index : "")));
+  const b = badgeAlt(a); if (b) meta.append(b);
+  const rechts = a.kurs != null
+    ? el("div", {class: "right"}, zahl.format(a.kurs), el("br"),
+        el("span", {class: a.veraenderung >= 0 ? "pos" : "neg", text: prozent(a.veraenderung)}))
+    : el("div", {class: "right", text: "keine Daten"});
+  const info = el("div", {class: "plain"}, el("div", {class: "name", text: a.name}), rechts, meta);
+  if (!treffer.length && a.kurs != null)
+    info.append(el("div", {class: "meta", text: "Aktuell kein 1-2-3-Signal oder Setup", style: "grid-column:1 / -1"}));
+  return el("div", {class: "card"}, el("div", {class: "top"}, info, stern(a.kuerzel)));
+}
+
+/* ---------- Anzeige ---------- */
+function tabBeschriftung() {
+  const d = state.daten;
+  const tabs = {signale: "Signale (" + d.signale.length + ")", setups: "Setups (" + d.setups.length + ")",
+    merkliste: "Watchlist (" + state.merkliste.length + ")"};
+  for (const [name, text] of Object.entries(tabs)) {
+    const b = document.getElementById("tab-" + name);
+    b.textContent = text; b.setAttribute("aria-selected", String(state.tab === name));
+  }
+}
+
 function zeichne() {
   const d = state.daten; if (!d) return;
   const art = state.tab;
-  document.getElementById("tab-signale").textContent = "Signale (" + d.signale.length + ")";
-  document.getElementById("tab-setups").textContent = "Setups (" + d.setups.length + ")";
-  document.getElementById("tab-signale").setAttribute("aria-selected", String(art === "signale"));
-  document.getElementById("tab-setups").setAttribute("aria-selected", String(art === "setups"));
+  tabBeschriftung();
+  document.getElementById("filters").style.display = art === "merkliste" ? "none" : "";
+  const suchfeld = document.getElementById("suche");
+  suchfeld.placeholder = art === "merkliste" ? "Aktie suchen und mit ☆ merken" : "Name oder Kürzel suchen";
   const q = state.suche.trim().toLowerCase();
-  const liste = d[art].filter(e =>
-    (state.richtung === "alle" || e.richtung === state.richtung) &&
-    (state.index === "alle" || e.index === state.index) &&
-    (!q || e.name.toLowerCase().includes(q) || e.kuerzel.toLowerCase().includes(q)));
+  const passt = e => !q || e.name.toLowerCase().includes(q) || e.kuerzel.toLowerCase().includes(q);
   const ziel = document.getElementById("liste");
   ziel.replaceChildren();
-  if (!liste.length) {
-    ziel.append(el("div", {class: "empty", text: d[art].length ? "Nichts gefunden. Filter anpassen." :
-      art === "signale" ? "Keine frischen Signale." : "Keine aktiven Setups."}));
+  const leer = text => ziel.append(el("div", {class: "empty", text: text}));
+
+  if (art === "merkliste") {
+    if (q) {                                   // Suche über alle Aktien
+      const gefunden = [...state.alle.values()].filter(passt);
+      if (!gefunden.length) return leer("Keine Aktie gefunden.");
+      gefunden.slice(0, 30).forEach(a => ziel.append(einfacheKarte(a)));
+      if (gefunden.length > 30) ziel.append(el("div", {class: "empty", text: "Weitere Treffer: Suche genauer eingeben."}));
+      return;
+    }
+    if (!state.merkliste.length)
+      return leer("Noch nichts auf der Watchlist. Tippe bei einer Aktie auf ☆ oder suche oben nach einer Aktie.");
+    const name = k => (state.alle.get(k) || {name: k}).name.toLowerCase();
+    [...state.merkliste].sort((a, b) => name(a).localeCompare(name(b), "de")).forEach(k => {
+      const mitMuster = [];
+      d.signale.forEach(e => { if (e.kuerzel === k) mitMuster.push(karte(e, "signale")); });
+      d.setups.forEach(e => { if (e.kuerzel === k) mitMuster.push(karte(e, "setups")); });
+      if (mitMuster.length) mitMuster.forEach(c => ziel.append(c));
+      else ziel.append(einfacheKarte(state.alle.get(k) || {kuerzel: k, name: k, index: ""}));
+    });
     return;
   }
+
+  const liste = d[art].filter(e =>
+    (state.richtung === "alle" || e.richtung === state.richtung) &&
+    (state.index === "alle" || e.index === state.index) && passt(e));
+  if (!liste.length)
+    return leer(d[art].length ? "Nichts gefunden. Filter anpassen." :
+      art === "signale" ? "Keine frischen Signale." : "Keine aktiven Setups.");
   liste.forEach(e => ziel.append(karte(e, art)));
 }
 
 function filterLeiste() {
   const f = document.getElementById("filters"); f.replaceChildren();
-  const indizes = ["alle", ...new Set([...state.daten.signale, ...state.daten.setups].map(e => e.index))];
+  const zeile1 = el("div", {class: "row"}), zeile2 = el("div", {class: "row"});
   const mk = (text, gruppe, wert) => {
-    const b = el("button", {class: "chip", text: text, "aria-pressed": String(state[gruppe] === wert)});
+    const b = el("button", {class: "chip", type: "button", text: text, "aria-pressed": String(state[gruppe] === wert)});
     b.addEventListener("click", () => { state[gruppe] = wert; filterLeiste(); zeichne(); });
     return b;
   };
-  [["Alle", "alle"], ["Long", "long"], ["Short", "short"]].forEach(([t, w]) => f.append(mk(t, "richtung", w)));
-  indizes.filter(i => i !== "alle").forEach(i => f.append(mk(i, "index", state.index === i ? "alle" : i)));
+  [["Alle", "alle"], ["Long", "long"], ["Short", "short"]].forEach(([t, w]) => zeile1.append(mk(t, "richtung", w)));
+  const indizes = [...new Set([...state.alle.values(), ...state.daten.signale, ...state.daten.setups].map(e => e.index))]
+    .filter(Boolean);
+  zeile2.append(mk("Alle Indizes", "index", "alle"));
+  indizes.forEach(i => zeile2.append(mk(i, "index", i)));
+  f.append(zeile1, zeile2);
 }
 
 async function start() {
-  document.getElementById("tab-signale").addEventListener("click", () => { state.tab = "signale"; zeichne(); });
-  document.getElementById("tab-setups").addEventListener("click", () => { state.tab = "setups"; zeichne(); });
+  [["signale", "tab-signale"], ["setups", "tab-setups"], ["merkliste", "tab-merkliste"]].forEach(([tab, id]) =>
+    document.getElementById(id).addEventListener("click", () => { state.tab = tab; state.suche = ""; document.getElementById("suche").value = ""; zeichne(); }));
   document.getElementById("suche").addEventListener("input", ev => { state.suche = ev.target.value; zeichne(); });
   let d;
   try {
@@ -254,6 +398,12 @@ async function start() {
     return;
   }
   state.daten = d;
+  // alle Aktien (ältere Ergebnisdateien ohne "alle": Treffer als Ersatz)
+  (d.alle || []).forEach(a => state.alle.set(a.kuerzel, a));
+  [...d.signale, ...d.setups].forEach(e => {
+    if (!state.alle.has(e.kuerzel)) state.alle.set(e.kuerzel, {kuerzel: e.kuerzel, name: e.name, index: e.index,
+      kurs: e.kurs, veraenderung: 0, stand: e.stand});
+  });
   const erstellt = new Date(d.erstellt);
   document.getElementById("sub").textContent = "Stand: " + (d.letzter_handelstag ? datumDE(d.letzter_handelstag) : "?") +
     " · " + d.anzahl_geprueft + " von " + d.anzahl_gesamt + " Aktien geprüft";
@@ -270,8 +420,9 @@ async function start() {
       text: "Die Daten sind " + Math.floor(alterTage) + " Tage alt. Der automatische Lauf scheint nicht mehr zu funktionieren."}));
   }
   document.getElementById("fuss").textContent = "Berechnet " + erstellt.toLocaleString("de-DE", {dateStyle: "short", timeStyle: "short"}) +
-    " aus Schlusskursen der Heimatbörse laut Yahoo Finance (Fenster N=" + d.einstellungen.N + "). " +
-    "Kurse bei Trade Republic können um Bruchteile eines Prozents abweichen, weil dort bis spät abends gehandelt wird. Keine Anlageberatung.";
+    " aus Kursen der Heimatbörse laut Yahoo Finance (Fenster N=" + d.einstellungen.N + "). " +
+    "Kurse bei Trade Republic können um Bruchteile eines Prozents abweichen, weil dort bis spät abends gehandelt wird. " +
+    "Die Watchlist wird nur auf diesem Gerät gespeichert. Keine Anlageberatung.";
   filterLeiste();
   zeichne();
 }
