@@ -15,7 +15,7 @@ N = 5                  # Fenster: so viele Tage links und rechts werden verglich
 MAX_ALTER_TAGE = 5     # Signale, die älter sind (in Handelstagen), werden nicht angezeigt
 MAX_ABSTAND_PROZENT = 5  # aktive Setups werden nur gezeigt, wenn der Kurs höchstens so weit vom Ausbruch entfernt ist
 BLOCK = 100            # so viele Aktien werden pro Abruf geladen
-KURS_TAGE = 160        # so viele Handelstage Kursverlauf bekommt jeder Treffer für den Chart in der App
+KURS_TAGE = 160        # so viele Handelstage (Open/High/Low/Close) bekommt jeder Treffer für den Chart in der App
 MAX_NACHLADEN = 150    # so viele Aktien mit fehlendem letzten Handelstag werden einzeln nachgeladen
 # -------------------------------------------------------------
 
@@ -167,17 +167,24 @@ def pruefe_aktie(close):
     return treffer
 
 
-def baue_eintrag(ticker, name, index_name, close, t):
-    """Wandelt einen Treffer in einen Eintrag für die JSON-Datei um (inklusive Kursverlauf für den Chart)."""
-    fenster = close.iloc[-KURS_TAGE:]
-    start_pos = len(close) - len(fenster)
+def baue_eintrag(ticker, name, index_name, df, t):
+    """Wandelt einen Treffer in einen Eintrag für die JSON-Datei um (inklusive Kerzendaten für den Chart)."""
+    close = df["Close"]
+    fenster = df.iloc[-KURS_TAGE:]
+    start_pos = len(df) - len(fenster)
     daten = [d.strftime("%Y-%m-%d") for d in fenster.index]
+
+    stellen = 3 if t["kurs"] < 5 else 2      # sehr billige Aktien brauchen eine Stelle mehr
+
+    def runde(spalte):
+        return [round(float(x), stellen) for x in fenster[spalte].values]
+
     eintrag = {
         "kuerzel": ticker, "name": name, "index": index_name, "richtung": t["richtung"],
         "stand": close.index[-1].strftime("%Y-%m-%d"),
         "punkt2": round(t["punkt2"], 2), "punkt3": round(t["punkt3"], 2), "kurs": round(t["kurs"], 2),
-        "kurse": {"d": daten, "c": [round(float(x), 3) for x in fenster.values]},
-        "kette": [{"d": close.index[i].strftime("%Y-%m-%d"), "nr": nr, "c": round(float(close.iloc[i]), 3)}
+        "kurse": {"d": daten, "o": runde("Open"), "h": runde("High"), "l": runde("Low"), "c": runde("Close")},
+        "kette": [{"d": close.index[i].strftime("%Y-%m-%d"), "nr": nr, "c": round(float(close.iloc[i]), stellen)}
                   for i, nr in t["kette"] if i >= start_pos],
     }
     if t["art"] == "signal":
@@ -188,13 +195,31 @@ def baue_eintrag(ticker, name, index_name, close, t):
     return eintrag
 
 
+FELDER = ("Open", "High", "Low", "Close")
+
+
 def lade_block(tickers):
-    """Lädt die Schlusskurse für einen Block von Aktien. Gibt eine Tabelle zurück (eine Spalte je Aktie)."""
+    """Lädt Open/High/Low/Close für einen Block von Aktien. Gibt je Feld eine Tabelle zurück (eine Spalte je Aktie)."""
     daten = yf.download(tickers, period=ZEITRAUM, auto_adjust=True, progress=False, threads=True)
-    kurse = daten["Close"]
-    if isinstance(kurse, pd.Series):
-        kurse = kurse.to_frame(tickers[0])
-    return kurse
+    tabellen = {}
+    for feld in FELDER:
+        tabelle = daten[feld]
+        if isinstance(tabelle, pd.Series):
+            tabelle = tabelle.to_frame(tickers[0])
+        tabellen[feld] = tabelle
+    return tabellen
+
+
+def baue_serie(tabellen, ticker):
+    """Macht aus den Tabellen eine Kerzen-Tabelle für eine Aktie. Tage ohne Schlusskurs fallen weg.
+    Fehlt bei einem Tag Open/High/Low, wird der Schlusskurs eingesetzt."""
+    df = pd.DataFrame({feld: tabellen[feld][ticker] for feld in FELDER})
+    df = df[df["Close"].notna()].copy()
+    for feld in ("Open", "High", "Low"):
+        df[feld] = df[feld].fillna(df["Close"])
+    df["High"] = df[["High", "Open", "Close"]].max(axis=1)   # Sicherheitsnetz gegen unstimmige Daten
+    df["Low"] = df[["Low", "Open", "Close"]].min(axis=1)
+    return df
 
 
 def zeige_tabelle(eintraege, art):
@@ -224,20 +249,20 @@ def lade_serien(tickers):
         block = tickers[b : b + BLOCK]
         nr = b // BLOCK + 1
         try:
-            kurse = lade_block(block)
+            tabellen = lade_block(block)
         except Exception as fehler:
             ohne_daten += block
             print(f"  Block {nr}/{gesamt}: Abruf fehlgeschlagen ({fehler})")
             continue
         for ticker in block:
-            if ticker not in kurse.columns:
+            if ticker not in tabellen["Close"].columns:
                 ohne_daten.append(ticker)
                 continue
-            close = kurse[ticker].dropna()
-            if len(close) < 40:
+            df = baue_serie(tabellen, ticker)
+            if len(df) < 40:
                 ohne_daten.append(ticker)
                 continue
-            serien[ticker] = close
+            serien[ticker] = df
         print(f"  Block {nr}/{gesamt} fertig")
     return serien, ohne_daten
 
@@ -262,7 +287,7 @@ def hole_nach(serien, ref):
     for t in veraltet:
         for versuch in range(2):
             try:
-                neu = lade_block([t])[t].dropna()
+                neu = baue_serie(lade_block([t]), t)
                 if len(neu) >= 40 and neu.index[-1] > serien[t].index[-1]:
                     serien[t] = neu
                     break
@@ -288,15 +313,15 @@ def main():
     veraltet = hole_nach(serien, ref) if ref is not None else []
 
     signale, setups = [], []
-    for ticker, close in serien.items():
+    for ticker, df in serien.items():
         try:
-            treffer = pruefe_aktie(close)
+            treffer = pruefe_aktie(df["Close"])
         except Exception as fehler:
             print(f"  Fehler bei {ticker}: {fehler}")
             ohne_daten.append(ticker)
             continue
         for t in treffer:
-            eintrag = baue_eintrag(ticker, str(namen.get(ticker, "-")), indizes.get(ticker, "-"), close, t)
+            eintrag = baue_eintrag(ticker, str(namen.get(ticker, "-")), indizes.get(ticker, "-"), df, t)
             (signale if t["art"] == "signal" else setups).append(eintrag)
 
     geprueft = len(tickers) - len(ohne_daten)
@@ -305,6 +330,17 @@ def main():
         print(f"\nFEHLER: Nur {geprueft} von {len(tickers)} Aktien konnten geprüft werden. "
               "Die Ergebnisdatei wird nicht überschrieben.")
         raise SystemExit(1)
+
+    # Kurzliste aller geprüften Aktien (für Suche und Watchlist in der App)
+    alle = []
+    for ticker, df in serien.items():
+        close = df["Close"]
+        kurs = float(close.iloc[-1])
+        vorher = float(close.iloc[-2]) if len(close) > 1 else kurs
+        alle.append({"kuerzel": ticker, "name": str(namen.get(ticker, "-")), "index": indizes.get(ticker, "-"),
+                     "kurs": round(kurs, 2), "stand": close.index[-1].strftime("%Y-%m-%d"),
+                     "veraenderung": round((kurs / vorher - 1) * 100, 2) if vorher else 0.0})
+    alle.sort(key=lambda a: a["name"].lower())
 
     signale.sort(key=lambda e: (e["tage_her"], e["kuerzel"]))
     setups.sort(key=lambda e: e["abstand"])
@@ -316,6 +352,7 @@ def main():
         "veraltet": veraltet,
         "ohne_daten": ohne_daten,
         "signale": signale, "setups": setups,
+        "alle": alle,
     }
     os.makedirs(os.path.dirname(AUSGABE), exist_ok=True)
     with open(AUSGABE, "w", encoding="utf-8") as f:
