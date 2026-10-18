@@ -33,7 +33,8 @@ h1{font-size:22px;margin:8px 0 2px;letter-spacing:-.01em}
   font-size:14px;margin:0 0 12px}
 .tabs{display:flex;background:var(--chip);border-radius:12px;padding:3px;margin-bottom:12px}
 .tabs button{flex:1;border:0;background:none;color:var(--muted);font:inherit;font-size:15px;font-weight:600;
-  padding:9px 0;border-radius:9px;cursor:pointer}
+  padding:7px 2px;border-radius:9px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:1px;line-height:1.15}
+.tabs button small{font-size:12px;font-weight:600;opacity:.75}
 .tabs button[aria-selected="true"]{background:var(--card);color:var(--text);box-shadow:0 1px 3px #0003}
 .filters{margin-bottom:10px}
 .filters .row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
@@ -67,6 +68,21 @@ input[type=search]{width:100%;font:inherit;padding:10px 12px;border-radius:10px;
 .ctrl .chip{font-size:12px;padding:4px 10px}
 .ctrl .sep{width:1px;align-self:stretch;background:var(--line);margin:0 2px}
 svg{width:100%;height:auto;display:block}
+.rbox{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:10px}
+.rbox h2{font-size:15px;margin:0 0 10px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.feld{display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--muted);min-width:0}
+.feld input{font:inherit;font-size:16px;color:var(--text);padding:9px 11px;border-radius:10px;border:1px solid var(--line);
+  background:var(--bg);width:100%;min-width:0}
+.zeile{display:flex;justify-content:space-between;gap:12px;padding:6px 0;font-size:14px;border-bottom:1px solid var(--line)}
+.zeile:last-child{border-bottom:0}
+.zeile span{color:var(--muted)} .zeile b{white-space:nowrap;text-align:right}
+.zeile.stark{font-size:15px} .zeile.stark span{color:var(--text)}
+.zielbox{background:color-mix(in srgb,var(--accent) 14%,transparent);border-radius:12px;padding:10px 12px;margin:8px 0}
+.zielbox .gross{font-size:26px;font-weight:700;letter-spacing:-.01em}
+.knopf{border:1px solid var(--line);background:var(--chip);color:var(--text);font:inherit;font-size:13px;padding:7px 12px;
+  border-radius:10px;cursor:pointer;margin-top:8px}
+.fehl{color:var(--short);font-size:14px}
 .hint{color:var(--muted);font-size:12px;margin:6px 0 0}
 .empty{color:var(--muted);text-align:center;padding:36px 12px}
 footer{color:var(--muted);font-size:12px;padding:14px 4px 28px}
@@ -82,6 +98,7 @@ footer{color:var(--muted);font-size:12px;padding:14px 4px 28px}
     <button role="tab" id="tab-signale" aria-selected="true">Signale</button>
     <button role="tab" id="tab-setups" aria-selected="false">Setups</button>
     <button role="tab" id="tab-merkliste" aria-selected="false">Watchlist</button>
+    <button role="tab" id="tab-rechner" aria-selected="false">Rechner</button>
   </div>
   <div class="filters" id="filters"></div>
   <input type="search" id="suche" placeholder="Name oder Kürzel suchen" autocomplete="off">
@@ -324,14 +341,135 @@ function einfacheKarte(a) {
   return el("div", {class: "card"}, el("div", {class: "top"}, info, stern(a.kuerzel)));
 }
 
+
+/* ---------- Rechner (Kaufsumme und Kursziel) ---------- */
+function parseZahl(text) {
+  const t = String(text == null ? "" : text).trim().replace(/[\s€%]/g, "");
+  if (t === "") return null;
+  const norm = t.includes(",") ? t.replace(/\./g, "").replace(",", ".") : t;
+  const v = Number(norm);
+  return /^[\d.]+$/.test(norm) && Number.isFinite(v) ? v : NaN;
+}
+const RECHNER_NAMEN = {stueck: "Stückzahl", kurs: "Kaufkurs", gebKauf: "Gebühren Kauf", slipKauf: "Slippage Kauf",
+  slipVerkauf: "Slippage Verkauf", gebVerkauf: "Gebühren Verkauf", ziel: "Gewünschter Gewinn", steuer: "Steuer",
+  geld: "Geldkurs", brief: "Briefkurs"};
+
+function rechneKursziel(roh) {
+  const v = {};
+  for (const [id, name] of Object.entries(RECHNER_NAMEN)) {
+    const x = parseZahl(roh[id]);
+    if (x !== null && Number.isNaN(x)) return {fehler: name + ": bitte eine Zahl eingeben (z. B. 12,50)."};
+    v[id] = x;
+  }
+  if (v.steuer !== null && v.steuer >= 100) return {fehler: "Steuer: bitte einen Wert unter 100 % eingeben."};
+  const n = v.stueck, k = v.kurs;
+  if (!n || !k) return {hinweis: "Gib Stückzahl und Kaufkurs ein, dann erscheint die Rechnung."};
+  const sk = v.slipKauf || 0, sv = v.slipVerkauf || 0, gk = v.gebKauf || 0, gv = v.gebVerkauf || 0, t = (v.steuer || 0) / 100;
+  const aktien = n * k, slipK = n * sk, einsatz = aktien + slipK + gk;
+  const r = {n, k, aktien, slipK, gk, einsatz, breakEven: (einsatz + gv) / n + sv, t};
+  if (v.ziel !== null && v.ziel > 0) {
+    const brutto = v.ziel / (1 - t);                              // Gewinn vor Steuer, der nötig ist
+    const kursziel = Math.ceil(((einsatz + brutto + gv) / n + sv) * 100 - 1e-7) / 100;   // auf den Cent aufgerundet
+    const erloes = n * kursziel - n * sv - gv;
+    const vorSteuer = erloes - einsatz, steuer = vorSteuer > 0 ? vorSteuer * t : 0;
+    Object.assign(r, {ziel: v.ziel, kursziel, erloes, vorSteuer, steuer, netto: vorSteuer - steuer});
+  }
+  return r;
+}
+
+const eur = v => zahl.format(v) + " €";
+function rechnerSeite(ziel) {
+  const gespeichert = speicher.lies("rechner", {});
+  const werte = (gespeichert && typeof gespeichert === "object" && !Array.isArray(gespeichert)) ? gespeichert : {};
+  const felder = {};
+  const feld = (id, label) => {
+    const inp = el("input", {type: "text", inputmode: "decimal", autocomplete: "off", autocapitalize: "off", id: "r-" + id});
+    inp.value = werte[id] || "";
+    inp.addEventListener("input", () => { werte[id] = inp.value; speicher.schreib("rechner", werte); aktualisiere(); });
+    felder[id] = inp;
+    return el("label", {class: "feld"}, el("span", {text: label}), inp);
+  };
+  const spreadInfo = el("div", {class: "meta", style: "margin-top:8px"});
+  const spreadKnopf = el("button", {class: "knopf", type: "button", text: "Halben Spread als Slippage übernehmen"});
+  spreadKnopf.addEventListener("click", () => {
+    const g = parseZahl(felder.geld.value), b = parseZahl(felder.brief.value);
+    if (g === null || b === null || Number.isNaN(g) || Number.isNaN(b) || b <= g) return;
+    const halb = ((b - g) / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "").replace(".", ",");
+    ["slipKauf", "slipVerkauf"].forEach(id => { felder[id].value = halb; werte[id] = halb; });
+    speicher.schreib("rechner", werte); aktualisiere();
+  });
+  const reset = el("button", {class: "knopf", type: "button", text: "Alle Felder leeren"});
+  reset.addEventListener("click", () => {
+    Object.keys(felder).forEach(id => { felder[id].value = ""; delete werte[id]; });
+    speicher.schreib("rechner", werte); aktualisiere();
+  });
+  const ergebnis = el("div", {class: "rbox", id: "r-ergebnis"});
+
+  function aktualisiere() {
+    // Spread aus Geld-/Briefkurs
+    const g = parseZahl(felder.geld.value), b = parseZahl(felder.brief.value);
+    const spreadOk = g !== null && b !== null && !Number.isNaN(g) && !Number.isNaN(b) && b > g;
+    spreadInfo.textContent = spreadOk
+      ? "Spread: " + eur(b - g) + " (" + zahl.format((b - g) / ((b + g) / 2) * 100) + " % vom Mittelkurs). Je Seite etwa " + eur((b - g) / 2) + " pro Aktie."
+      : "Trage Geld- und Briefkurs aus der Orderansicht ein, dann steht hier der Spread.";
+    spreadKnopf.style.display = spreadOk ? "" : "none";
+    // Ergebnis
+    const r = rechneKursziel(Object.fromEntries(Object.keys(RECHNER_NAMEN).map(id => [id, felder[id].value])));
+    ergebnis.replaceChildren();
+    if (r.fehler) { ergebnis.append(el("div", {class: "fehl", text: r.fehler})); return; }
+    if (r.hinweis) { ergebnis.append(el("div", {class: "meta", text: r.hinweis})); return; }
+    const zeile = (text, wert, stark) => el("div", {class: "zeile" + (stark ? " stark" : "")}, el("span", {text: text}), el("b", {text: wert}));
+    ergebnis.append(el("h2", {text: "Kaufsumme"}),
+      zeile("Aktien (" + zahl.format(r.n) + " × " + zahl.format(r.k) + " €)", eur(r.aktien)),
+      zeile("Slippage Kauf", eur(r.slipK)),
+      zeile("Gebühren Kauf", eur(r.gk)),
+      zeile("Kaufsumme gesamt", eur(r.einsatz), true));
+    const verkauf = el("div", {style: "margin-top:12px"}, el("h2", {text: "Verkauf"}));
+    verkauf.append(zeile("Break-even (Gewinn 0 €)", eur(r.breakEven) + " (" + prozent((r.breakEven / r.k - 1) * 100) + ")"));
+    if (r.kursziel != null) {
+      verkauf.append(el("div", {class: "zielbox"},
+        el("div", {class: "meta", text: "Kursziel für " + eur(r.ziel) + " Gewinn" + (r.t > 0 ? " nach Steuern" : "")}),
+        el("div", {class: "gross", text: eur(r.kursziel)}),
+        el("div", {class: "meta", text: prozent((r.kursziel / r.k - 1) * 100) + " zum Kaufkurs, auf den Cent aufgerundet"})),
+        zeile("Erlös beim Kursziel (nach Slippage und Gebühren)", eur(r.erloes)),
+        zeile("Gewinn vor Steuer", eur(r.vorSteuer)));
+      if (r.t > 0) verkauf.append(zeile("Steuer (" + zahl.format(r.t * 100) + " %)", eur(r.steuer)), zeile("Gewinn nach Steuer", eur(r.netto), true));
+      else verkauf.append(zeile("Gewinn", eur(r.netto), true));
+    } else {
+      verkauf.append(el("div", {class: "meta", text: "Trage einen gewünschten Gewinn ein, dann erscheint das Kursziel.", style: "margin-top:6px"}));
+    }
+    ergebnis.append(verkauf);
+  }
+
+  ziel.append(
+    el("div", {class: "rbox"}, el("h2", {text: "Kauf"}),
+      el("div", {class: "grid2"}, feld("stueck", "Stückzahl"), feld("kurs", "Kaufkurs pro Aktie (€)"),
+        feld("gebKauf", "Gebühren Kauf (€)"))),
+    el("div", {class: "rbox"}, el("h2", {text: "Slippage und Spread"}),
+      el("div", {class: "grid2"}, feld("geld", "Geldkurs / Bid (€)"), feld("brief", "Briefkurs / Ask (€)")),
+      spreadInfo, spreadKnopf,
+      el("div", {class: "grid2", style: "margin-top:10px"},
+        feld("slipKauf", "Slippage je Aktie, Kauf (€)"), feld("slipVerkauf", "Slippage je Aktie, Verkauf (€)"))),
+    el("div", {class: "rbox"}, el("h2", {text: "Verkauf und Ziel"}),
+      el("div", {class: "grid2"}, feld("gebVerkauf", "Gebühren Verkauf (€)"), feld("ziel", "Gewünschter Gewinn (€)"),
+        feld("steuer", "Steuer auf Gewinn (%), optional"))),
+    ergebnis,
+    el("p", {class: "hint", text: "Alle Beträge in Euro. Kaufsumme = Stückzahl × Kaufkurs + Stückzahl × Slippage + Gebühren. " +
+      "Kursziel = Kurs, bei dem nach Slippage, Gebühren und optional Steuer genau der gewünschte Gewinn übrig bleibt. " +
+      "Reine Rechenhilfe ohne Gewähr, die echte Ausführung kann abweichen. Deine Eingaben werden nur auf diesem Gerät gespeichert."}),
+    reset);
+  aktualisiere();
+}
+
 /* ---------- Anzeige ---------- */
 function tabBeschriftung() {
   const d = state.daten;
-  const tabs = {signale: "Signale (" + d.signale.length + ")", setups: "Setups (" + d.setups.length + ")",
-    merkliste: "Watchlist (" + state.merkliste.length + ")"};
-  for (const [name, text] of Object.entries(tabs)) {
+  const tabs = {signale: ["Signale", d.signale.length], setups: ["Setups", d.setups.length],
+    merkliste: ["Watchlist", state.merkliste.length], rechner: ["Rechner", "Kursziel"]};
+  for (const [name, [text, unten]] of Object.entries(tabs)) {
     const b = document.getElementById("tab-" + name);
-    b.textContent = text; b.setAttribute("aria-selected", String(state.tab === name));
+    b.replaceChildren(el("span", {text: text}), el("small", {text: String(unten)}));
+    b.setAttribute("aria-selected", String(state.tab === name));
   }
 }
 
@@ -339,14 +477,18 @@ function zeichne() {
   const d = state.daten; if (!d) return;
   const art = state.tab;
   tabBeschriftung();
-  document.getElementById("filters").style.display = art === "merkliste" ? "none" : "";
+  const rechner = art === "rechner";
+  document.getElementById("filters").style.display = (art === "merkliste" || rechner) ? "none" : "";
+  document.getElementById("anzeige").style.display = rechner ? "none" : "";
   const suchfeld = document.getElementById("suche");
+  suchfeld.style.display = rechner ? "none" : "";
   suchfeld.placeholder = art === "merkliste" ? "Aktie suchen und mit ☆ merken" : "Name oder Kürzel suchen";
   const q = state.suche.trim().toLowerCase();
   const passt = e => !q || e.name.toLowerCase().includes(q) || e.kuerzel.toLowerCase().includes(q);
   const ziel = document.getElementById("liste");
   ziel.replaceChildren();
   const leer = text => ziel.append(el("div", {class: "empty", text: text}));
+  if (rechner) { rechnerSeite(ziel); return; }
 
   if (art === "merkliste") {
     if (q) {                                   // Suche über alle Aktien
@@ -412,7 +554,7 @@ function filterLeiste() {
 }
 
 async function start() {
-  [["signale", "tab-signale"], ["setups", "tab-setups"], ["merkliste", "tab-merkliste"]].forEach(([tab, id]) =>
+  [["signale", "tab-signale"], ["setups", "tab-setups"], ["merkliste", "tab-merkliste"], ["rechner", "tab-rechner"]].forEach(([tab, id]) =>
     document.getElementById(id).addEventListener("click", () => { state.tab = tab; state.suche = ""; document.getElementById("suche").value = ""; zeichne(); }));
   document.getElementById("suche").addEventListener("input", ev => { state.suche = ev.target.value; zeichne(); });
   let d;
