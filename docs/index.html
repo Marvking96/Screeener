@@ -352,7 +352,7 @@ function parseZahl(text) {
 }
 const RECHNER_NAMEN = {stueck: "Stückzahl", kurs: "Kaufkurs", gebKauf: "Gebühren Kauf", slipKauf: "Slippage Kauf",
   slipVerkauf: "Slippage Verkauf", gebVerkauf: "Gebühren Verkauf", ziel: "Gewünschter Gewinn", steuer: "Steuer",
-  geld: "Geldkurs", brief: "Briefkurs"};
+  geld: "Geldkurs", brief: "Briefkurs", budget: "Verfügbares Geld", stopkurs: "Verkaufs-/Stop-Kurs"};
 
 function rechneKursziel(roh) {
   const v = {};
@@ -363,10 +363,26 @@ function rechneKursziel(roh) {
   }
   if (v.steuer !== null && v.steuer >= 100) return {fehler: "Steuer: bitte einen Wert unter 100 % eingeben."};
   const n = v.stueck, k = v.kurs;
-  if (!n || !k) return {hinweis: "Gib Stückzahl und Kaufkurs ein, dann erscheint die Rechnung."};
   const sk = v.slipKauf || 0, sv = v.slipVerkauf || 0, gk = v.gebKauf || 0, gv = v.gebVerkauf || 0, t = (v.steuer || 0) / 100;
+  // Wie viele Aktien passen ins Budget? Kosten je Aktie = Kaufkurs + Slippage, dazu einmal die Gebühr.
+  let budgetInfo = null;
+  if (v.budget) {
+    if (!k) budgetInfo = {kursFehlt: true};
+    else {
+      const proAktie = k + sk, frei = v.budget - gk;
+      const anzahl = frei >= proAktie ? Math.floor(frei / proAktie + 1e-9) : 0;
+      const summe = anzahl > 0 ? anzahl * proAktie + gk : 0;
+      budgetInfo = {budget: v.budget, anzahl, summe, rest: v.budget - summe, mindest: proAktie + gk};
+    }
+  }
+  if (!n || !k) return {hinweis: "Gib Stückzahl und Kaufkurs ein, dann erscheint die Rechnung.", budgetInfo};
   const aktien = n * k, slipK = n * sk, einsatz = aktien + slipK + gk;
-  const r = {n, k, aktien, slipK, gk, einsatz, breakEven: (einsatz + gv) / n + sv, t};
+  const r = {n, k, aktien, slipK, gk, einsatz, breakEven: (einsatz + gv) / n + sv, t, budgetInfo, budget: v.budget};
+  if (v.stopkurs) {                                               // Ergebnis, wenn zu diesem Kurs verkauft wird
+    const erloes = n * v.stopkurs - n * sv - gv, vor = erloes - einsatz, steuer = vor > 0 ? vor * t : 0;
+    r.stop = {kurs: v.stopkurs, erloes, vor, steuer, netto: vor - steuer, proz: vor / einsatz * 100,
+      kursProz: (v.stopkurs / k - 1) * 100, budgetProz: v.budget ? vor / v.budget * 100 : null};
+  }
   if (v.ziel !== null && v.ziel > 0) {
     const brutto = v.ziel / (1 - t);                              // Gewinn vor Steuer, der nötig ist
     const kursziel = Math.ceil(((einsatz + brutto + gv) / n + sv) * 100 - 1e-7) / 100;   // auf den Cent aufgerundet
@@ -404,6 +420,9 @@ function rechnerSeite(ziel) {
     speicher.schreib("rechner", werte); aktualisiere();
   });
   const ergebnis = el("div", {class: "rbox", id: "r-ergebnis"});
+  const budgetErg = el("div", {style: "margin-top:10px"});
+  const zeile = (text, wert, stark, farbe) => el("div", {class: "zeile" + (stark ? " stark" : "")}, el("span", {text: text}),
+    el("b", {text: wert, style: farbe ? "color:var(--" + farbe + ")" : ""}));
 
   function aktualisiere() {
     // Spread aus Geld-/Briefkurs
@@ -415,10 +434,26 @@ function rechnerSeite(ziel) {
     spreadKnopf.style.display = spreadOk ? "" : "none";
     // Ergebnis
     const r = rechneKursziel(Object.fromEntries(Object.keys(RECHNER_NAMEN).map(id => [id, felder[id].value])));
-    ergebnis.replaceChildren();
+    ergebnis.replaceChildren(); budgetErg.replaceChildren();
+    const bi = r.budgetInfo;
+    if (bi) {
+      if (bi.kursFehlt) budgetErg.append(el("div", {class: "meta", text: "Trage den Kaufkurs ein, dann erscheint die mögliche Stückzahl."}));
+      else if (bi.anzahl < 1) budgetErg.append(el("div", {class: "meta",
+        text: "Dein Geld reicht nicht für eine Aktie. Du brauchst mindestens " + eur(bi.mindest) + " (Kurs, Slippage und Gebühr)."}));
+      else {
+        const uebernehmen = el("button", {class: "knopf", type: "button", text: bi.anzahl + " als Stückzahl übernehmen"});
+        uebernehmen.addEventListener("click", () => {
+          const wert = String(bi.anzahl); felder.stueck.value = wert; werte.stueck = wert;
+          speicher.schreib("rechner", werte); aktualisiere();
+        });
+        budgetErg.append(el("div", {class: "zielbox"}, el("div", {class: "meta", text: "Mit " + eur(bi.budget) + " kannst du dir leisten"}),
+            el("div", {class: "gross", text: bi.anzahl + (bi.anzahl === 1 ? " Aktie" : " Aktien")}),
+            el("div", {class: "meta", text: "Kaufsumme " + eur(bi.summe) + " inklusive Slippage und Gebühr, übrig bleiben " + eur(bi.rest)})),
+          uebernehmen);
+      }
+    }
     if (r.fehler) { ergebnis.append(el("div", {class: "fehl", text: r.fehler})); return; }
     if (r.hinweis) { ergebnis.append(el("div", {class: "meta", text: r.hinweis})); return; }
-    const zeile = (text, wert, stark) => el("div", {class: "zeile" + (stark ? " stark" : "")}, el("span", {text: text}), el("b", {text: wert}));
     ergebnis.append(el("h2", {text: "Kaufsumme"}),
       zeile("Aktien (" + zahl.format(r.n) + " × " + zahl.format(r.k) + " €)", eur(r.aktien)),
       zeile("Slippage Kauf", eur(r.slipK)),
@@ -439,12 +474,27 @@ function rechnerSeite(ziel) {
       verkauf.append(el("div", {class: "meta", text: "Trage einen gewünschten Gewinn ein, dann erscheint das Kursziel.", style: "margin-top:6px"}));
     }
     ergebnis.append(verkauf);
+    if (r.stop) {
+      const st = r.stop, farbe = st.vor >= 0 ? "long" : "short";
+      const box = el("div", {style: "margin-top:12px"}, el("h2", {text: "Ergebnis bei Verkauf zu " + eur(st.kurs)}),
+        el("div", {class: "zielbox"},
+          el("div", {class: "meta", text: st.vor >= 0 ? "Gewinn vor Steuer" : "Verlust"}),
+          el("div", {class: "gross", style: "color:var(--" + farbe + ")", text: (st.vor > 0 ? "+" : "") + eur(st.vor)}),
+          el("div", {class: "meta", text: prozent(st.kursProz) + " beim Kurs, " + prozent(st.proz) + " der Kaufsumme"})),
+        zeile("Erlös (nach Slippage und Gebühren)", eur(st.erloes)),
+        zeile("Kaufsumme", eur(r.einsatz)));
+      if (st.budgetProz != null) box.append(zeile("Anteil an deinem Geld", prozent(st.budgetProz), false, farbe));
+      if (st.vor > 0 && r.t > 0) box.append(zeile("Steuer (" + zahl.format(r.t * 100) + " %)", eur(st.steuer)), zeile("Gewinn nach Steuer", eur(st.netto), true));
+      if (st.vor < 0) box.append(el("div", {class: "meta", style: "margin-top:6px", text: "Steuerliche Verlustverrechnung ist hier nicht eingerechnet."}));
+      ergebnis.append(box);
+    }
   }
 
   ziel.append(
     el("div", {class: "rbox"}, el("h2", {text: "Kauf"}),
       el("div", {class: "grid2"}, feld("stueck", "Stückzahl"), feld("kurs", "Kaufkurs pro Aktie (€)"),
-        feld("gebKauf", "Gebühren Kauf (€)"))),
+        feld("gebKauf", "Gebühren Kauf (€)"), feld("budget", "Verfügbares Geld (€), optional")),
+      budgetErg),
     el("div", {class: "rbox"}, el("h2", {text: "Slippage und Spread"}),
       el("div", {class: "grid2"}, feld("geld", "Geldkurs / Bid (€)"), feld("brief", "Briefkurs / Ask (€)")),
       spreadInfo, spreadKnopf,
@@ -452,10 +502,11 @@ function rechnerSeite(ziel) {
         feld("slipKauf", "Slippage je Aktie, Kauf (€)"), feld("slipVerkauf", "Slippage je Aktie, Verkauf (€)"))),
     el("div", {class: "rbox"}, el("h2", {text: "Verkauf und Ziel"}),
       el("div", {class: "grid2"}, feld("gebVerkauf", "Gebühren Verkauf (€)"), feld("ziel", "Gewünschter Gewinn (€)"),
-        feld("steuer", "Steuer auf Gewinn (%), optional"))),
+        feld("stopkurs", "Verkaufs-/Stop-Kurs (€), optional"), feld("steuer", "Steuer auf Gewinn (%), optional"))),
     ergebnis,
     el("p", {class: "hint", text: "Alle Beträge in Euro. Kaufsumme = Stückzahl × Kaufkurs + Stückzahl × Slippage + Gebühren. " +
       "Kursziel = Kurs, bei dem nach Slippage, Gebühren und optional Steuer genau der gewünschte Gewinn übrig bleibt. " +
+      "Mit dem Verkaufs-/Stop-Kurs siehst du, wie viel Gewinn oder Verlust bei diesem Kurs herauskommt. " +
       "Reine Rechenhilfe ohne Gewähr, die echte Ausführung kann abweichen. Deine Eingaben werden nur auf diesem Gerät gespeichert."}),
     reset);
   aktualisiere();
