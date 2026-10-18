@@ -76,6 +76,7 @@ footer{color:var(--muted);font-size:12px;padding:14px 4px 28px}
 <div class="wrap">
   <h1>1-2-3 Screener</h1>
   <p class="sub" id="sub">Lade Daten …</p>
+  <div id="anzeige"></div>
   <div id="warn"></div>
   <div class="tabs" role="tablist">
     <button role="tab" id="tab-signale" aria-selected="true">Signale</button>
@@ -100,6 +101,7 @@ const state = {
   ansicht: speicher.lies("ansicht", "kerzen"),       // "kerzen" oder "linie"
   zeitraum: speicher.lies("zeitraum", "auto"),       // "auto", "3m" oder "alles"
   merkliste: speicher.lies("merkliste", []),         // Liste von Kürzeln
+  waehrung: speicher.lies("waehrung", "orig"),       // "orig" (Heimatwährung) oder "eur"
   alle: new Map()
 };
 if (!Array.isArray(state.merkliste)) state.merkliste = [];
@@ -122,6 +124,13 @@ const datumDE = iso => { const [y, m, d] = iso.split("-"); return d + "." + m + 
 const kurzDatum = iso => { const [, m, d] = iso.split("-"); return d + "." + m + "."; };
 const handelstage = n => n === 0 ? "am letzten Handelstag" : n === 1 ? "1 Handelstag her" : n + " Handelstage her";
 const prozent = v => (v > 0 ? "+" : "") + zahl.format(v) + " %";
+
+/* ---------- Währung ---------- */
+const waehrungVon = e => e.waehrung || (e.index === "S&P 500" ? "USD" : "EUR");
+const euroModus = () => state.waehrung === "eur" && !!(state.daten && state.daten.eur_usd);
+const faktor = e => (euroModus() && waehrungVon(e) === "USD") ? 1 / state.daten.eur_usd : 1;
+const zeichenVon = e => (waehrungVon(e) === "USD" && !euroModus()) ? "$" : "€";
+const geld = (e, v) => zahl.format(v * faktor(e)) + " " + zeichenVon(e);
 
 /* ---------- Watchlist ---------- */
 const istMerk = k => state.merkliste.includes(k);
@@ -160,14 +169,16 @@ function fensterGroesse(e, gesamt) {
 function chart(e) {
   const W = 360, H = 240, pl = 8, pr = 58, pt = 14, pb = 24;
   const K = e.kurse, gesamt = K.c.length;
+  const f = faktor(e), sk = arr => f === 1 ? arr : arr.map(v => v * f);
+  const p2 = e.punkt2 * f, p3 = e.punkt3 * f;
   const kerzen = state.ansicht === "kerzen" && !!(K.o && K.h && K.l);
   const s0 = gesamt - fensterGroesse(e, gesamt);
-  const d = K.d.slice(s0), c = K.c.slice(s0);
-  const o = kerzen ? K.o.slice(s0) : c, h = kerzen ? K.h.slice(s0) : c, l = kerzen ? K.l.slice(s0) : c;
+  const d = K.d.slice(s0), c = sk(K.c.slice(s0));
+  const o = kerzen ? sk(K.o.slice(s0)) : c, h = kerzen ? sk(K.h.slice(s0)) : c, l = kerzen ? sk(K.l.slice(s0)) : c;
   const n = c.length;
   const long = e.richtung === "long";
   const farbe = long ? "var(--long)" : "var(--short)";
-  const alle = h.concat(l, [e.punkt2, e.punkt3]);
+  const alle = h.concat(l, [p2, p3]);
   let lo = Math.min(...alle), hi = Math.max(...alle);
   const pad = (hi - lo) * 0.14 || 1; lo -= pad; hi += pad;
   const pitch = (W - pl - pr) / n;
@@ -176,14 +187,14 @@ function chart(e) {
   const s = sv("svg", {viewBox: "0 0 " + W + " " + H, role: "img",
     "aria-label": (kerzen ? "Kerzenchart " : "Kursverlauf ") + e.name + " mit den Punkten 1, 2 und 3"});
   // Hilfslinien für Punkt 2 und Punkt 3
-  [[e.punkt2, farbe], [e.punkt3, "var(--muted)"]].forEach(([wert, col]) => {
+  [[p2, farbe], [p3, "var(--muted)"]].forEach(([wert, col]) => {
     s.append(sv("line", {x1: pl, x2: W - pr, y1: y(wert), y2: y(wert), stroke: col, "stroke-width": 1,
       "stroke-dasharray": "4 3", opacity: 0.8}));
   });
   // Beschriftungen rechts, ohne dass sie sich überlappen
   const beschr = [
-    {y: y(e.punkt2) + 4, text: "2: " + zahl.format(e.punkt2), col: farbe, fett: 600},
-    {y: y(e.punkt3) + 4, text: "3: " + zahl.format(e.punkt3), col: "var(--muted)", fett: 600},
+    {y: y(p2) + 4, text: "2: " + zahl.format(p2), col: farbe, fett: 600},
+    {y: y(p3) + 4, text: "3: " + zahl.format(p3), col: "var(--muted)", fett: 600},
     {y: y(c[n - 1]) + 4, text: zahl.format(c[n - 1]), col: "var(--accent)", fett: 400},
   ].sort((a, b) => a.y - b.y);
   for (let k = 1; k < beschr.length; k++) if (beschr[k].y - beschr[k - 1].y < 13) beschr[k].y = beschr[k - 1].y + 13;
@@ -214,7 +225,7 @@ function chart(e) {
   for (const p of e.kette) {
     const i = d.indexOf(p.d); if (i < 0) continue;
     const hoch = long ? p.nr === 2 : p.nr !== 2;
-    const cx = x(i), cy = y(p.c);
+    const cx = x(i), cy = y(p.c * f);
     const oy = (hoch ? y(h[i]) - 13 : y(l[i]) + 13);
     s.append(sv("circle", {cx: cx, cy: cy, r: 2.6, fill: farbe, stroke: "var(--card)", "stroke-width": 1}));
     s.append(sv("circle", {cx: cx, cy: oy, r: 8, fill: farbe}));
@@ -248,8 +259,8 @@ function karte(e, art) {
     ? el("div", {class: "right"}, handelstage(e.tage_her))
     : el("div", {class: "right"}, "noch " + zahl.format(e.abstand) + " %");
   const unten = art === "signale"
-    ? "Ausbruch " + (long ? "über " : "unter ") + zahl.format(e.punkt2) + " · Kurs " + zahl.format(e.kurs)
-    : "Ausbruch bei " + zahl.format(e.punkt2) + " · Kurs " + zahl.format(e.kurs);
+    ? "Ausbruch " + (long ? "über " : "unter ") + geld(e, e.punkt2) + " · Kurs " + geld(e, e.kurs)
+    : "Ausbruch bei " + geld(e, e.punkt2) + " · Kurs " + geld(e, e.kurs);
   const kopf = el("button", {class: "head", type: "button", "aria-expanded": String(offen)},
     el("div", {class: "name", text: e.name}),
     rechts,
@@ -264,8 +275,8 @@ function karte(e, art) {
   const fuellen = () => {
     detail.replaceChildren();
     const fakten = el("div", {class: "facts"},
-      el("div", {}, el("b", {text: zahl.format(e.punkt2)}), el("span", {text: "Punkt 2"})),
-      el("div", {}, el("b", {text: zahl.format(e.punkt3)}), el("span", {text: "Punkt 3"})),
+      el("div", {}, el("b", {text: geld(e, e.punkt2)}), el("span", {text: "Punkt 2"})),
+      el("div", {}, el("b", {text: geld(e, e.punkt3)}), el("span", {text: "Punkt 3"})),
       el("div", {}, el("b", {text: art === "signale" ? datumDE(e.signaltag) : zahl.format(e.abstand) + " %"}),
         el("span", {text: art === "signale" ? "Ausbruchstag" : "bis zum Ausbruch"})));
     const ctrl = el("div", {class: "ctrl"});
@@ -279,7 +290,8 @@ function karte(e, art) {
     const kerzenModus = hatKerzen && state.ansicht === "kerzen";
     detail.append(fakten, ctrl, chart(e),
       el("p", {class: "hint", text: (kerzenModus ? "Tageskerzen (grün = Schluss über Eröffnung). " : "Schlusskurse. ") +
-        "Zahlen = 1-2-3-Punkte, bestimmt nach Schlusskurs" + (art === "signale" ? ". Stern = Ausbruch." : ".")}));
+        "Zahlen = 1-2-3-Punkte, bestimmt nach Schlusskurs" + (art === "signale" ? ". Stern = Ausbruch." : ".") +
+        " Preise in " + zeichenVon(e) + (faktor(e) !== 1 ? ", alle Tage mit dem heutigen Wechselkurs umgerechnet." : ".")}));
   };
   if (offen) fuellen();
   kopf.addEventListener("click", () => {
@@ -303,7 +315,7 @@ function einfacheKarte(a) {
   meta.append(document.createTextNode(a.kuerzel + (a.index ? " · " + a.index : "")));
   const b = badgeAlt(a); if (b) meta.append(b);
   const rechts = a.kurs != null
-    ? el("div", {class: "right"}, zahl.format(a.kurs), el("br"),
+    ? el("div", {class: "right"}, geld(a, a.kurs), el("br"),
         el("span", {class: a.veraenderung >= 0 ? "pos" : "neg", text: prozent(a.veraenderung)}))
     : el("div", {class: "right", text: "keine Daten"});
   const info = el("div", {class: "plain"}, el("div", {class: "name", text: a.name}), rechts, meta);
@@ -366,6 +378,23 @@ function zeichne() {
   liste.forEach(e => ziel.append(karte(e, art)));
 }
 
+function anzeigeLeiste() {
+  const z = document.getElementById("anzeige"); z.replaceChildren();
+  const d = state.daten;
+  const gibtUSD = [...d.signale, ...d.setups, ...state.alle.values()].some(e => waehrungVon(e) === "USD");
+  if (!d.eur_usd || !gibtUSD) return;
+  const zeile = el("div", {class: "filters row", style: "display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px"});
+  [["Original ($ / €)", "orig"], ["Alles in Euro", "eur"]].forEach(([text, wert]) => {
+    const b = el("button", {class: "chip", type: "button", text: text, "aria-pressed": String(state.waehrung === wert)});
+    b.addEventListener("click", () => { state.waehrung = wert; speicher.schreib("waehrung", wert); anzeigeLeiste(); zeichne(); });
+    zeile.append(b);
+  });
+  if (euroModus()) zeile.append(el("span", {class: "meta",
+    text: "1 € = " + new Intl.NumberFormat("de-DE", {minimumFractionDigits: 4, maximumFractionDigits: 4}).format(d.eur_usd) + " $" +
+      (d.eur_usd_datum ? " (" + kurzDatum(d.eur_usd_datum) + ")" : "")}));
+  z.append(zeile);
+}
+
 function filterLeiste() {
   const f = document.getElementById("filters"); f.replaceChildren();
   const zeile1 = el("div", {class: "row"}), zeile2 = el("div", {class: "row"});
@@ -423,6 +452,7 @@ async function start() {
     " aus Kursen der Heimatbörse laut Yahoo Finance (Fenster N=" + d.einstellungen.N + "). " +
     "Kurse bei Trade Republic können um Bruchteile eines Prozents abweichen, weil dort bis spät abends gehandelt wird. " +
     "Die Watchlist wird nur auf diesem Gerät gespeichert. Keine Anlageberatung.";
+  anzeigeLeiste();
   filterLeiste();
   zeichne();
 }
