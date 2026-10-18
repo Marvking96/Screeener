@@ -16,6 +16,7 @@ MAX_ALTER_TAGE = 5     # Signale, die älter sind (in Handelstagen), werden nich
 MAX_ABSTAND_PROZENT = 5  # aktive Setups werden nur gezeigt, wenn der Kurs höchstens so weit vom Ausbruch entfernt ist
 BLOCK = 100            # so viele Aktien werden pro Abruf geladen
 KURS_TAGE = 160        # so viele Handelstage (Open/High/Low/Close) bekommt jeder Treffer für den Chart in der App
+WAEHRUNG = {"S&P 500": "USD", "DAX 40": "EUR"}   # Währung der Kurse je Index (Yahoo liefert die Heimatwährung)
 MAX_NACHLADEN = 150    # so viele Aktien mit fehlendem letzten Handelstag werden einzeln nachgeladen
 # -------------------------------------------------------------
 
@@ -167,6 +168,20 @@ def pruefe_aktie(close):
     return treffer
 
 
+def hole_eurusd():
+    """Holt den letzten Wechselkurs: wie viele US-Dollar ein Euro kostet. Bei Fehlern (None, None)."""
+    for versuch in range(3):
+        try:
+            kurse = yf.Ticker("EURUSD=X").history(period="10d")["Close"].dropna()
+            kurs = float(kurse.iloc[-1])
+            if 0.5 < kurs < 2:
+                return round(kurs, 5), kurse.index[-1].strftime("%Y-%m-%d")
+        except Exception as fehler:
+            print(f"  Wechselkurs: Versuch {versuch + 1} fehlgeschlagen ({fehler})")
+        time.sleep(1)
+    return None, None
+
+
 def baue_eintrag(ticker, name, index_name, df, t):
     """Wandelt einen Treffer in einen Eintrag für die JSON-Datei um (inklusive Kerzendaten für den Chart)."""
     close = df["Close"]
@@ -180,7 +195,8 @@ def baue_eintrag(ticker, name, index_name, df, t):
         return [round(float(x), stellen) for x in fenster[spalte].values]
 
     eintrag = {
-        "kuerzel": ticker, "name": name, "index": index_name, "richtung": t["richtung"],
+        "kuerzel": ticker, "name": name, "index": index_name, "waehrung": WAEHRUNG.get(index_name, "EUR"),
+        "richtung": t["richtung"],
         "stand": close.index[-1].strftime("%Y-%m-%d"),
         "punkt2": round(t["punkt2"], 2), "punkt3": round(t["punkt3"], 2), "kurs": round(t["kurs"], 2),
         "kurse": {"d": daten, "o": runde("Open"), "h": runde("High"), "l": runde("Low"), "c": runde("Close")},
@@ -338,9 +354,12 @@ def main():
         kurs = float(close.iloc[-1])
         vorher = float(close.iloc[-2]) if len(close) > 1 else kurs
         alle.append({"kuerzel": ticker, "name": str(namen.get(ticker, "-")), "index": indizes.get(ticker, "-"),
-                     "kurs": round(kurs, 2), "stand": close.index[-1].strftime("%Y-%m-%d"),
+                     "waehrung": WAEHRUNG.get(indizes.get(ticker, "-"), "EUR"), "kurs": round(kurs, 2), "stand": close.index[-1].strftime("%Y-%m-%d"),
                      "veraenderung": round((kurs / vorher - 1) * 100, 2) if vorher else 0.0})
     alle.sort(key=lambda a: a["name"].lower())
+
+    eur_usd, eur_usd_datum = hole_eurusd()
+    print(f"Wechselkurs EUR/USD: {eur_usd} ({eur_usd_datum})" if eur_usd else "Wechselkurs konnte nicht geladen werden (Euro-Anzeige in der App ist dann aus).")
 
     signale.sort(key=lambda e: (e["tage_her"], e["kuerzel"]))
     setups.sort(key=lambda e: e["abstand"])
@@ -353,6 +372,7 @@ def main():
         "ohne_daten": ohne_daten,
         "signale": signale, "setups": setups,
         "alle": alle,
+        "eur_usd": eur_usd, "eur_usd_datum": eur_usd_datum,
     }
     os.makedirs(os.path.dirname(AUSGABE), exist_ok=True)
     with open(AUSGABE, "w", encoding="utf-8") as f:
