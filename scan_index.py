@@ -16,6 +16,7 @@ MAX_ALTER_TAGE = 5     # Signale, die älter sind (in Handelstagen), werden nich
 MAX_ABSTAND_PROZENT = 5  # aktive Setups werden nur gezeigt, wenn der Kurs höchstens so weit vom Ausbruch entfernt ist
 BLOCK = 100            # so viele Aktien werden pro Abruf geladen
 KURS_TAGE = 160        # so viele Handelstage (Open/High/Low/Close) bekommt jeder Treffer für den Chart in der App
+VOLUMEN_TAGE = 20      # so viele Handelstage zählen für das durchschnittliche Handelsvolumen
 WAEHRUNG = {"S&P 500": "USD", "DAX 40": "EUR"}   # Währung der Kurse je Index (Yahoo liefert die Heimatwährung)
 MAX_NACHLADEN = 150    # so viele Aktien mit fehlendem letzten Handelstag werden einzeln nachgeladen
 # -------------------------------------------------------------
@@ -182,6 +183,26 @@ def hole_eurusd():
     return None, None
 
 
+def volumen_kennzahlen(serien, indizes):
+    """Durchschnittliches Handelsvolumen der letzten VOLUMEN_TAGE Tage je Aktie.
+    Die Einstufung hoch/mittel/niedrig ist ein Drittel-Vergleich innerhalb desselben Index (nach Umsatz = Stück x Kurs).
+    Hinweis: Yahoo liefert bei deutschen Aktien nur das Xetra-Volumen, nicht den Handel an allen Börsen."""
+    kennzahlen, je_index = {}, {}
+    for ticker, df in serien.items():
+        letzte = df.iloc[-VOLUMEN_TAGE:]
+        stueck = float(letzte["Volume"].mean())
+        umsatz = float((letzte["Volume"] * letzte["Close"]).mean())
+        kennzahlen[ticker] = {"volumen": round(stueck / 1000, 1), "umsatz": round(umsatz / 1e6, 2), "volumen_klasse": None}
+        if umsatz > 0:
+            je_index.setdefault(indizes.get(ticker, "-"), []).append((umsatz, ticker))
+    for gruppe in je_index.values():
+        gruppe.sort(reverse=True)
+        m = len(gruppe)
+        for rang, (_, ticker) in enumerate(gruppe):
+            kennzahlen[ticker]["volumen_klasse"] = "hoch" if rang < m / 3 else ("niedrig" if rang >= 2 * m / 3 else "mittel")
+    return kennzahlen
+
+
 def baue_eintrag(ticker, name, index_name, df, t):
     """Wandelt einen Treffer in einen Eintrag für die JSON-Datei um (inklusive Kerzendaten für den Chart)."""
     close = df["Close"]
@@ -199,7 +220,8 @@ def baue_eintrag(ticker, name, index_name, df, t):
         "richtung": t["richtung"],
         "stand": close.index[-1].strftime("%Y-%m-%d"),
         "punkt2": round(t["punkt2"], 2), "punkt3": round(t["punkt3"], 2), "kurs": round(t["kurs"], 2),
-        "kurse": {"d": daten, "o": runde("Open"), "h": runde("High"), "l": runde("Low"), "c": runde("Close")},
+        "kurse": {"d": daten, "o": runde("Open"), "h": runde("High"), "l": runde("Low"), "c": runde("Close"),
+                  "v": [int(round(float(x) / 1000)) for x in fenster["Volume"].values]},     # Volumen in Tausend Stück
         "kette": [{"d": close.index[i].strftime("%Y-%m-%d"), "nr": nr, "c": round(float(close.iloc[i]), stellen)}
                   for i, nr in t["kette"] if i >= start_pos],
     }
@@ -211,7 +233,7 @@ def baue_eintrag(ticker, name, index_name, df, t):
     return eintrag
 
 
-FELDER = ("Open", "High", "Low", "Close")
+FELDER = ("Open", "High", "Low", "Close", "Volume")
 
 
 def lade_block(tickers):
@@ -219,7 +241,7 @@ def lade_block(tickers):
     daten = yf.download(tickers, period=ZEITRAUM, auto_adjust=True, progress=False, threads=True)
     tabellen = {}
     for feld in FELDER:
-        tabelle = daten[feld]
+        tabelle = daten[feld] if feld in daten else daten["Close"] * 0     # fehlt das Volumen, wird 0 eingesetzt
         if isinstance(tabelle, pd.Series):
             tabelle = tabelle.to_frame(tickers[0])
         tabellen[feld] = tabelle
@@ -233,6 +255,7 @@ def baue_serie(tabellen, ticker):
     df = df[df["Close"].notna()].copy()
     for feld in ("Open", "High", "Low"):
         df[feld] = df[feld].fillna(df["Close"])
+    df["Volume"] = df["Volume"].fillna(0)
     df["High"] = df[["High", "Open", "Close"]].max(axis=1)   # Sicherheitsnetz gegen unstimmige Daten
     df["Low"] = df[["Low", "Open", "Close"]].min(axis=1)
     return df
@@ -328,6 +351,8 @@ def main():
     ref = referenzdatum(serien)
     veraltet = hole_nach(serien, ref) if ref is not None else []
 
+    vol = volumen_kennzahlen(serien, indizes)
+
     signale, setups = [], []
     for ticker, df in serien.items():
         try:
@@ -338,6 +363,7 @@ def main():
             continue
         for t in treffer:
             eintrag = baue_eintrag(ticker, str(namen.get(ticker, "-")), indizes.get(ticker, "-"), df, t)
+            eintrag.update(vol.get(ticker, {}))
             (signale if t["art"] == "signal" else setups).append(eintrag)
 
     geprueft = len(tickers) - len(ohne_daten)
@@ -355,6 +381,7 @@ def main():
         vorher = float(close.iloc[-2]) if len(close) > 1 else kurs
         alle.append({"kuerzel": ticker, "name": str(namen.get(ticker, "-")), "index": indizes.get(ticker, "-"),
                      "waehrung": WAEHRUNG.get(indizes.get(ticker, "-"), "EUR"), "kurs": round(kurs, 2), "stand": close.index[-1].strftime("%Y-%m-%d"),
+                     **vol.get(ticker, {}),
                      "veraenderung": round((kurs / vorher - 1) * 100, 2) if vorher else 0.0})
     alle.sort(key=lambda a: a["name"].lower())
 
@@ -367,7 +394,8 @@ def main():
         "erstellt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "letzter_handelstag": ref.strftime("%Y-%m-%d") if ref is not None else None,
         "anzahl_gesamt": len(tickers), "anzahl_geprueft": geprueft,
-        "einstellungen": {"N": N, "max_alter_tage": MAX_ALTER_TAGE, "max_abstand_prozent": MAX_ABSTAND_PROZENT},
+        "einstellungen": {"N": N, "max_alter_tage": MAX_ALTER_TAGE, "max_abstand_prozent": MAX_ABSTAND_PROZENT,
+                          "volumen_tage": VOLUMEN_TAGE},
         "veraltet": veraltet,
         "ohne_daten": ohne_daten,
         "signale": signale, "setups": setups,
