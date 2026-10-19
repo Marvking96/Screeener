@@ -83,6 +83,29 @@ svg{width:100%;height:auto;display:block}
 .knopf{border:1px solid var(--line);background:var(--chip);color:var(--text);font:inherit;font-size:13px;padding:7px 12px;
   border-radius:10px;cursor:pointer;margin-top:8px}
 .fehl{color:var(--short);font-size:14px}
+.cbox{position:relative}
+.filters .row .meta{align-self:center;margin-right:2px}
+.volzeile{font-size:13px;color:var(--muted);margin:0 0 8px}
+.popup{position:absolute;top:6px;z-index:2;width:max-content;max-width:calc(100% - 12px);font-size:12px;
+  background:color-mix(in srgb,var(--card) 93%,transparent);border:1px solid var(--line);border-radius:10px;
+  padding:7px 9px;box-shadow:0 4px 14px #0004;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+.popup.links{left:6px} .popup.rechts{right:6px}
+.popup .pk{display:flex;align-items:center;gap:4px;margin-bottom:4px}
+.popup .pk b{flex:1;font-size:12px}
+.popup .pk button{border:0;background:var(--chip);color:var(--text);border-radius:7px;width:27px;height:25px;
+  font-size:15px;line-height:1;cursor:pointer;padding:0}
+.popup .pgrid{display:grid;grid-template-columns:auto auto;gap:2px 16px}
+.popup .pz{display:flex;justify-content:space-between;gap:8px;padding:1px 0}
+.popup .pz span{color:var(--muted)}
+.vollbild{position:fixed;inset:0;z-index:50;background:var(--bg);color:var(--text);display:flex;flex-direction:column;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+.vb-kopf{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid var(--line)}
+.vb-kopf .titel{flex:1 1 100%;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vb-kopf .chip{font-size:14px;padding:6px 12px}
+.vb-kopf .rechts-aus{margin-left:auto}
+.vb-flaeche{flex:1;position:relative;min-height:0;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+.vb-flaeche svg{position:absolute;inset:0;width:100%;height:100%}
+.vb-fuss{color:var(--muted);font-size:12px;padding:6px 12px 8px;border-top:1px solid var(--line)}
 .hint{color:var(--muted);font-size:12px;margin:6px 0 0}
 .empty{color:var(--muted);text-align:center;padding:36px 12px}
 footer{color:var(--muted);font-size:12px;padding:14px 4px 28px}
@@ -114,7 +137,7 @@ const speicher = {
   schreib(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} }
 };
 const state = {
-  daten: null, tab: "signale", richtung: "alle", index: "alle", suche: "", offen: null,
+  daten: null, tab: "signale", richtung: "alle", index: "alle", volumen: "alle", suche: "", offen: null,
   ansicht: speicher.lies("ansicht", "kerzen"),       // "kerzen" oder "linie"
   zeitraum: speicher.lies("zeitraum", "auto"),       // "auto", "3m" oder "alles"
   merkliste: speicher.lies("merkliste", []),         // Liste von Kürzeln
@@ -173,7 +196,7 @@ function stern(k) {
   return b;
 }
 
-/* ---------- Chart (Kerzen oder Linie) ---------- */
+/* ---------- Chart (Kerzen oder Linie, Volumen, Auswahl, Vollbild) ---------- */
 function fensterGroesse(e, gesamt) {
   if (state.zeitraum === "alles") return gesamt;
   if (state.zeitraum === "3m") return Math.min(63, gesamt);
@@ -183,26 +206,50 @@ function fensterGroesse(e, gesamt) {
   return Math.min(gesamt, Math.max(63, gesamt - aelteste + 8));
 }
 
-function chart(e) {
-  const W = 360, H = 240, pl = 8, pr = 58, pt = 14, pb = 24;
-  const K = e.kurse, gesamt = K.c.length;
-  const f = faktor(e), sk = arr => f === 1 ? arr : arr.map(v => v * f);
-  const p2 = e.punkt2 * f, p3 = e.punkt3 * f;
-  const kerzen = state.ansicht === "kerzen" && !!(K.o && K.h && K.l);
-  const s0 = gesamt - fensterGroesse(e, gesamt);
-  const d = K.d.slice(s0), c = sk(K.c.slice(s0));
-  const o = kerzen ? sk(K.o.slice(s0)) : c, h = kerzen ? sk(K.h.slice(s0)) : c, l = kerzen ? sk(K.l.slice(s0)) : c;
+const WOCHENTAG = new Intl.DateTimeFormat("de-DE", {weekday: "short", day: "2-digit", month: "2-digit", year: "numeric"});
+const datumLang = iso => WOCHENTAG.format(new Date(iso + "T12:00:00"));
+// Volumen kommt in Tausend Stück
+const volText = tsd => tsd >= 1000 ? zahl.format(tsd / 1000) + " Mio." : zahl.format(tsd).replace(/,00$/, "") + " Tsd.";
+
+// alle Reihen eines Eintrags, in die gewählte Währung umgerechnet
+function reihen(e) {
+  const K = e.kurse, f = faktor(e), sk = a => (a && f !== 1) ? a.map(v => v * f) : a;
+  return {d: K.d, c: sk(K.c), o: sk(K.o), h: sk(K.h), l: sk(K.l), f: f,
+    v: (K.v && K.v.some(x => x > 0)) ? K.v : null, p2: e.punkt2 * f, p3: e.punkt3 * f,
+    hatKerzen: !!(K.o && K.h && K.l)};
+}
+
+// zeichnet den Chart für einen Ausschnitt; opt: W, H, start, anzahl, kerzen, volumen, volAnteil, wahl, pr
+function chartBauen(e, R, opt) {
+  const W = opt.W, H = opt.H, pl = 8, pr = opt.pr || 58, pt = 14, pb = 24;
+  const gesamt = R.c.length;
+  const m = Math.max(Math.min(8, gesamt), Math.min(gesamt, Math.round(opt.anzahl)));
+  const s0 = Math.max(0, Math.min(gesamt - m, Math.round(opt.start)));
+  const kerzen = !!opt.kerzen && R.hatKerzen;
+  const mitVol = !!opt.volumen && !!R.v;
+  const volH = mitVol ? Math.round(H * (opt.volAnteil || 0.15)) : 0;
+  const unten = H - pb, preisUnten = unten - volH - (mitVol ? 8 : 0);
+  const sl = a => a.slice(s0, s0 + m);
+  const d = sl(R.d), c = sl(R.c);
+  const o = kerzen ? sl(R.o) : c, h = kerzen ? sl(R.h) : c, l = kerzen ? sl(R.l) : c;
   const n = c.length;
   const long = e.richtung === "long";
   const farbe = long ? "var(--long)" : "var(--short)";
+  const p2 = R.p2, p3 = R.p3;
   const alle = h.concat(l, [p2, p3]);
   let lo = Math.min(...alle), hi = Math.max(...alle);
   const pad = (hi - lo) * 0.14 || 1; lo -= pad; hi += pad;
   const pitch = (W - pl - pr) / n;
   const x = i => pl + pitch * (i + 0.5);
-  const y = v => pt + (H - pt - pb) * (1 - (v - lo) / (hi - lo));
+  const y = v => pt + (preisUnten - pt) * (1 - (v - lo) / (hi - lo));
+  const bw = Math.max(1.2, Math.min(10, pitch * 0.68));
   const s = sv("svg", {viewBox: "0 0 " + W + " " + H, role: "img",
     "aria-label": (kerzen ? "Kerzenchart " : "Kursverlauf ") + e.name + " mit den Punkten 1, 2 und 3"});
+  // ausgewählter Tag: heller Streifen hinter allem
+  const wi = opt.wahl != null ? opt.wahl - s0 : -1;
+  if (wi >= 0 && wi < n)
+    s.append(sv("rect", {x: x(wi) - Math.max(pitch / 2, 3), y: pt, width: Math.max(pitch, 6), height: unten - pt,
+      fill: "var(--accent)", opacity: 0.16}));
   // Hilfslinien für Punkt 2 und Punkt 3
   [[p2, farbe], [p3, "var(--muted)"]].forEach(([wert, col]) => {
     s.append(sv("line", {x1: pl, x2: W - pr, y1: y(wert), y2: y(wert), stroke: col, "stroke-width": 1,
@@ -215,17 +262,26 @@ function chart(e) {
     {y: y(c[n - 1]) + 4, text: zahl.format(c[n - 1]), col: "var(--accent)", fett: 400},
   ].sort((a, b) => a.y - b.y);
   for (let k = 1; k < beschr.length; k++) if (beschr[k].y - beschr[k - 1].y < 13) beschr[k].y = beschr[k - 1].y + 13;
-  const maxY = H - pb - 2;
+  const maxY = preisUnten - 2;
   if (beschr[beschr.length - 1].y > maxY) {
     beschr[beschr.length - 1].y = maxY;
     for (let k = beschr.length - 2; k >= 0; k--) if (beschr[k + 1].y - beschr[k].y < 13) beschr[k].y = beschr[k + 1].y - 13;
   }
   beschr.forEach(b => s.append(sv("text", {x: W - pr + 4, y: b.y, fill: b.col, "font-size": 11, "font-weight": b.fett}, b.text)));
-  if (kerzen) {
-    const bw = Math.max(1.2, Math.min(8, pitch * 0.68));
+  const steigt = i => kerzen ? c[i] >= o[i] : (i === 0 || c[i] >= c[i - 1]);
+  // Volumenbalken
+  if (mitVol) {
+    const v = sl(R.v), vmax = Math.max(1, ...v), vTop = unten - volH;
+    s.append(sv("text", {x: pl + 2, y: vTop + 9, fill: "var(--muted)", "font-size": 9}, "Volumen"));
     for (let i = 0; i < n; i++) {
-      const col = c[i] >= o[i] ? "var(--long)" : "var(--short)";
-      const cx = x(i);
+      const hh = Math.max(v[i] > 0 ? 0.8 : 0, volH * v[i] / vmax);
+      s.append(sv("rect", {x: x(i) - bw / 2, y: unten - hh, width: bw, height: hh,
+        fill: steigt(i) ? "var(--long)" : "var(--short)", opacity: 0.5}));
+    }
+  }
+  if (kerzen) {
+    for (let i = 0; i < n; i++) {
+      const col = steigt(i) ? "var(--long)" : "var(--short)", cx = x(i);
       s.append(sv("line", {x1: cx, x2: cx, y1: y(h[i]), y2: y(l[i]), stroke: col, "stroke-width": pitch < 3 ? 0.8 : 1}));
       const oben = y(Math.max(o[i], c[i])), hoehe = Math.max(1, y(Math.min(o[i], c[i])) - oben);
       s.append(sv("rect", {x: cx - bw / 2, y: oben, width: bw, height: hoehe, fill: col}));
@@ -242,7 +298,7 @@ function chart(e) {
   for (const p of e.kette) {
     const i = d.indexOf(p.d); if (i < 0) continue;
     const hoch = long ? p.nr === 2 : p.nr !== 2;
-    const cx = x(i), cy = y(p.c * f);
+    const cx = x(i), cy = y(p.c * R.f);
     const oy = (hoch ? y(h[i]) - 13 : y(l[i]) + 13);
     s.append(sv("circle", {cx: cx, cy: cy, r: 2.6, fill: farbe, stroke: "var(--card)", "stroke-width": 1}));
     s.append(sv("circle", {cx: cx, cy: oy, r: 8, fill: farbe}));
@@ -259,10 +315,153 @@ function chart(e) {
     s.append(sv("text", {x: x(i), y: H - 6, "text-anchor": k === 0 ? "start" : k === 2 ? "end" : "middle",
       fill: "var(--muted)", "font-size": 10}, kurzDatum(d[i])));
   });
-  return s;
+  return {svg: s, s0, m, pitch, W, kerzen,
+    // Tag (absoluter Index) unter einer Bildschirmposition
+    indexAus: cx => {
+      const r = s.getBoundingClientRect();
+      const rel = (cx - r.left) / (r.width || 1) * W;
+      return s0 + Math.max(0, Math.min(n - 1, Math.floor((rel - pl) / pitch)));
+    },
+    xAnteil: i => x(i - s0) / W};
+}
+
+// kleines Popup mit Eröffnung, Hoch, Tief, Schluss und Volumen eines Tages
+function popupBauen(e, R, abs, bau, akt) {
+  const px = v => zahl.format(v) + " " + zeichenVon(e);
+  const zeile = (k, w, farbe) => el("div", {class: "pz"}, el("span", {text: k}),
+    el("b", {text: w, style: farbe ? "color:var(--" + farbe + ")" : ""}));
+  const knopf = (text, label, fn) => {
+    const b = el("button", {type: "button", "aria-label": label, text: text});
+    b.addEventListener("click", ev => { ev.stopPropagation(); fn(); });
+    return b;
+  };
+  const p = el("div", {class: "popup " + (bau.xAnteil(abs) > 0.5 ? "links" : "rechts")});
+  ["click", "pointerdown", "wheel"].forEach(t => p.addEventListener(t, ev => ev.stopPropagation()));
+  p.append(el("div", {class: "pk"}, el("b", {text: datumLang(R.d[abs])}),
+    knopf("‹", "Vorheriger Tag", akt.zurueck), knopf("›", "Nächster Tag", akt.vor), knopf("✕", "Schließen", akt.zu)));
+  const gitter = el("div", {class: "pgrid"});
+  if (bau.kerzen) gitter.append(zeile("Eröffnung", px(R.o[abs])), zeile("Hoch", px(R.h[abs])), zeile("Tief", px(R.l[abs])));
+  gitter.append(zeile("Schluss", px(R.c[abs])));
+  if (abs > 0) {
+    const ch = (R.c[abs] / R.c[abs - 1] - 1) * 100;
+    gitter.append(zeile("Zum Vortag", prozent(ch), ch >= 0 ? "long" : "short"));
+  }
+  if (R.v) {
+    gitter.append(zeile("Volumen", R.v[abs] > 0 ? volText(R.v[abs]) : "–"));
+    const vor = R.v.slice(Math.max(0, abs - VOLUMEN_TAGE_ANZEIGE), abs), schnitt = vor.length ? vor.reduce((a, b) => a + b, 0) / vor.length : 0;
+    if (schnitt > 0 && R.v[abs] > 0) gitter.append(zeile("Vs. Ø " + vor.length + " Tage", "×" + zahl.format(R.v[abs] / schnitt)));
+  }
+  p.append(gitter);
+  return p;
+}
+const VOLUMEN_TAGE_ANZEIGE = 20;
+
+// Vollbild: Chart über den ganzen Bildschirm, Zoom mit zwei Fingern oder Mausrad, Verschieben mit einem Finger
+function vollbild(e) {
+  const R = reihen(e), gesamt = R.c.length, MIN = Math.min(10, gesamt);
+  let anzahl = fensterGroesse(e, gesamt), start = gesamt - anzahl, wahl = null, bau = null, raf = 0;
+  const ueber = el("div", {class: "vollbild", role: "dialog", "aria-label": "Chart " + e.name});
+  const flaeche = el("div", {class: "vb-flaeche"});
+  const kopf = el("div", {class: "vb-kopf"});
+  const schliessen = () => {
+    window.removeEventListener("resize", planen); window.removeEventListener("keydown", taste);
+    document.body.style.overflow = vorher; ueber.remove();
+  };
+  const vorher = document.body.style.overflow;
+  const chip = (text, label, fn, an) => {
+    const b = el("button", {class: "chip", type: "button", text: text, "aria-label": label, "aria-pressed": String(!!an)});
+    b.addEventListener("click", fn); return b;
+  };
+  const kopfFuellen = () => {
+    kopf.replaceChildren(el("div", {class: "titel", text: e.name + " · " + e.kuerzel + " · " + e.index}));
+    if (R.hatKerzen) {
+      kopf.append(chip("Kerzen", "Kerzenansicht", () => { state.ansicht = "kerzen"; speicher.schreib("ansicht", "kerzen"); kopfFuellen(); zeichneVB(); }, state.ansicht === "kerzen"),
+        chip("Linie", "Linienansicht", () => { state.ansicht = "linie"; speicher.schreib("ansicht", "linie"); kopfFuellen(); zeichneVB(); }, state.ansicht !== "kerzen"));
+    }
+    kopf.append(chip("−", "Herauszoomen", () => zoomEnde(1 / 0.7)), chip("+", "Hineinzoomen", () => zoomEnde(0.7)),
+      chip("Alles", "Alles anzeigen", () => { anzahl = gesamt; start = 0; zeichneVB(); }),
+      chip("✕ Schließen", "Vollbild schließen", schliessen));
+    kopf.lastChild.classList.add("rechts-aus");
+  };
+  const zoomEnde = f => {                       // Zoom um den gewählten Tag, sonst um das rechte Ende
+    const anker = wahl != null ? wahl : start + anzahl - 1, anteil = (anker - start) / anzahl;
+    anzahl = Math.max(MIN, Math.min(gesamt, anzahl * f)); start = anker - anteil * anzahl; zeichneVB();
+  };
+  const klemmen = () => { anzahl = Math.max(MIN, Math.min(gesamt, anzahl)); start = Math.max(0, Math.min(gesamt - anzahl, start)); };
+  function zeichneVB() {
+    klemmen();
+    const W = Math.max(260, flaeche.clientWidth), H = Math.max(180, flaeche.clientHeight);
+    bau = chartBauen(e, R, {W, H, start, anzahl, kerzen: state.ansicht === "kerzen", volumen: true, volAnteil: 0.2,
+      wahl, pr: W > 600 ? 64 : 58});
+    flaeche.replaceChildren(bau.svg);
+    if (wahl != null) {
+      const gehe = d => { wahl = Math.max(0, Math.min(gesamt - 1, wahl + d));
+        if (wahl < start) start = wahl; else if (wahl > start + anzahl - 1) start = wahl - anzahl + 1; zeichneVB(); };
+      flaeche.append(popupBauen(e, R, wahl, bau, {zurueck: () => gehe(-1), vor: () => gehe(1), zu: () => { wahl = null; zeichneVB(); }}));
+    }
+  }
+  function planen() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; zeichneVB(); }); }
+  const taste = ev => { if (ev.key === "Escape") schliessen(); };
+
+  // Gesten: ein Finger = verschieben (kurzes Antippen = Tag wählen), zwei Finger = zoomen
+  const zeiger = new Map(); let pinch = null, bewegt = false, t0 = 0, startX = 0;
+  flaeche.addEventListener("pointerdown", ev => {
+    try { flaeche.setPointerCapture(ev.pointerId); } catch (_) {}
+    zeiger.set(ev.pointerId, {x: ev.clientX, y: ev.clientY});
+    if (zeiger.size === 1) { bewegt = false; t0 = Date.now(); startX = ev.clientX; }
+    if (zeiger.size === 2) {
+      const [a, b] = [...zeiger.values()], r = flaeche.getBoundingClientRect();
+      const anteil = Math.max(0, Math.min(1, ((a.x + b.x) / 2 - r.left - 8) / Math.max(1, r.width - 66)));
+      pinch = {abstand: Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)), anzahl, anteil, ankerIdx: start + anteil * anzahl};
+      bewegt = true;
+    }
+  });
+  flaeche.addEventListener("pointermove", ev => {
+    const z = zeiger.get(ev.pointerId); if (!z) return;
+    const alt = {x: z.x, y: z.y}; z.x = ev.clientX; z.y = ev.clientY;
+    if (zeiger.size === 1) {
+      if (Math.abs(ev.clientX - startX) > 6) bewegt = true;
+      if (bewegt && bau) { start -= (ev.clientX - alt.x) / bau.pitch; planen(); }
+    } else if (zeiger.size === 2 && pinch) {
+      const [a, b] = [...zeiger.values()], abstand = Math.max(10, Math.hypot(a.x - b.x, a.y - b.y));
+      anzahl = Math.max(MIN, Math.min(gesamt, pinch.anzahl * pinch.abstand / abstand));
+      start = pinch.ankerIdx - pinch.anteil * anzahl; planen();
+    }
+  });
+  const ende = ev => {
+    const z = zeiger.get(ev.pointerId); if (!z) return;
+    const tipp = zeiger.size === 1 && !bewegt && Date.now() - t0 < 500 && ev.type === "pointerup";
+    zeiger.delete(ev.pointerId);
+    if (zeiger.size < 2) pinch = null;
+    if (tipp && bau) { wahl = bau.indexAus(ev.clientX); zeichneVB(); }
+  };
+  flaeche.addEventListener("pointerup", ende); flaeche.addEventListener("pointercancel", ende);
+  flaeche.addEventListener("wheel", ev => {
+    ev.preventDefault();
+    const r = flaeche.getBoundingClientRect(), anteil = Math.max(0, Math.min(1, (ev.clientX - r.left - 8) / Math.max(1, r.width - 66)));
+    const ankerIdx = start + anteil * anzahl;
+    anzahl = Math.max(MIN, Math.min(gesamt, anzahl * Math.exp(ev.deltaY * 0.002))); start = ankerIdx - anteil * anzahl; planen();
+  }, {passive: false});
+
+  ueber.append(kopf, flaeche,
+    el("div", {class: "vb-fuss", text: "Tippen = Tag wählen · Ziehen = verschieben · zwei Finger oder Mausrad = zoomen. Tipp: Handy quer halten."}));
+  document.body.append(ueber); document.body.style.overflow = "hidden";
+  window.addEventListener("resize", planen); window.addEventListener("keydown", taste);
+  kopfFuellen(); zeichneVB();
 }
 
 /* ---------- Karten ---------- */
+const KLASSE = {hoch: "hohes Volumen", mittel: "mittleres Volumen", niedrig: "niedriges Volumen"};
+const DRITTEL = {hoch: "oberes", mittel: "mittleres", niedrig: "unteres"};
+function volumenZeile(e) {
+  if (!(e.volumen > 0)) return null;
+  const tage = (state.daten.einstellungen && state.daten.einstellungen.volumen_tage) || 20;
+  let text = "Handelsvolumen Ø " + tage + " Tage: " + volText(e.volumen) + " Stück · Umsatz ≈ " +
+    zahl.format(e.umsatz * faktor(e)) + " Mio. " + zeichenVon(e);
+  if (e.volumen_klasse) text += " · " + KLASSE[e.volumen_klasse] + " (" + DRITTEL[e.volumen_klasse] + " Drittel im " + e.index + ")";
+  return el("p", {class: "volzeile", text: text});
+}
+
 function badgeAlt(e) {
   return (e.stand && state.daten.letzter_handelstag && e.stand < state.daten.letzter_handelstag)
     ? el("span", {class: "badge alt", text: "Daten vom " + kurzDatum(e.stand)}) : null;
@@ -282,7 +481,7 @@ function karte(e, art) {
     el("div", {class: "name", text: e.name}),
     rechts,
     el("div", {class: "meta"}, el("span", {class: "badge " + e.richtung, text: long ? "Long" : "Short"}),
-      document.createTextNode(e.kuerzel + " · " + e.index), badgeAlt(e)),
+      document.createTextNode(e.kuerzel + " · " + e.index + (e.volumen_klasse ? " · Vol. " + e.volumen_klasse : "")), badgeAlt(e)),
     el("div", {class: "right", text: ""}));
   kopf.append(el("div", {class: "meta", text: unten, style: "grid-column:1 / -1"}));
   const k = el("div", {class: "card" + (offen ? " open" : "")}, el("div", {class: "top"}, kopf, stern(e.kuerzel)));
@@ -303,10 +502,29 @@ function karte(e, art) {
       return b;
     };
     if (hatKerzen) { ctrl.append(knopf("Kerzen", "ansicht", "kerzen"), knopf("Linie", "ansicht", "linie"), el("span", {class: "sep"})); }
-    ctrl.append(knopf("Auto", "zeitraum", "auto"), knopf("3 Monate", "zeitraum", "3m"), knopf("Alles", "zeitraum", "alles"));
+    ctrl.append(knopf("Auto", "zeitraum", "auto"), knopf("3 Monate", "zeitraum", "3m"), knopf("Alles", "zeitraum", "alles"), el("span", {class: "sep"}));
+    const vb = el("button", {class: "chip", type: "button", text: "⤢ Vollbild"});
+    vb.addEventListener("click", () => vollbild(e));
+    ctrl.append(vb);
     const kerzenModus = hatKerzen && state.ansicht === "kerzen";
-    detail.append(fakten, ctrl, chart(e),
-      el("p", {class: "hint", text: (kerzenModus ? "Tageskerzen (grün = Schluss über Eröffnung). " : "Schlusskurse. ") +
+    // Chart mit Auswahl: Antippen einer Kerze zeigt das Popup
+    const box = el("div", {class: "cbox"});
+    let wahl = null;
+    const zeigeChart = () => {
+      box.replaceChildren();
+      const R = reihen(e), m = fensterGroesse(e, R.c.length);
+      const bau = chartBauen(e, R, {W: 360, H: 270, start: R.c.length - m, anzahl: m, kerzen: state.ansicht === "kerzen",
+        volumen: true, volAnteil: 0.15, wahl});
+      bau.svg.addEventListener("click", ev => { wahl = bau.indexAus(ev.clientX); zeigeChart(); });
+      box.append(bau.svg);
+      if (wahl != null) {
+        const gehe = dd => { wahl = Math.max(bau.s0, Math.min(bau.s0 + bau.m - 1, wahl + dd)); zeigeChart(); };
+        box.append(popupBauen(e, R, wahl, bau, {zurueck: () => gehe(-1), vor: () => gehe(1), zu: () => { wahl = null; zeigeChart(); }}));
+      }
+    };
+    zeigeChart();
+    detail.append(fakten, volumenZeile(e), ctrl, box,
+      el("p", {class: "hint", text: (kerzenModus ? "Tageskerzen (grün = Schluss über Eröffnung), darunter das Volumen. Tippe auf eine Kerze für Details. " : "Schlusskurse. ") +
         "Zahlen = 1-2-3-Punkte, bestimmt nach Schlusskurs" + (art === "signale" ? ". Stern = Ausbruch." : ".") +
         " Preise in " + zeichenVon(e) + (faktor(e) !== 1 ? ", alle Tage mit dem heutigen Wechselkurs umgerechnet." : ".")}));
   };
@@ -329,7 +547,7 @@ function einfacheKarte(a) {
   state.daten.setups.forEach(x => { if (x.kuerzel === a.kuerzel) treffer.push({r: x.richtung, t: "Setup"}); });
   const meta = el("div", {class: "meta"});
   treffer.forEach(t => meta.append(el("span", {class: "badge " + t.r, text: t.t + (t.r === "long" ? " Long" : " Short")})));
-  meta.append(document.createTextNode(a.kuerzel + (a.index ? " · " + a.index : "")));
+  meta.append(document.createTextNode(a.kuerzel + (a.index ? " · " + a.index : "") + (a.volumen_klasse ? " · Vol. " + a.volumen_klasse : "")));
   const b = badgeAlt(a); if (b) meta.append(b);
   const rechts = a.kurs != null
     ? el("div", {class: "right"}, geld(a, a.kurs), el("br"),
@@ -564,7 +782,8 @@ function zeichne() {
 
   const liste = d[art].filter(e =>
     (state.richtung === "alle" || e.richtung === state.richtung) &&
-    (state.index === "alle" || e.index === state.index) && passt(e));
+    (state.index === "alle" || e.index === state.index) &&
+    (state.volumen === "alle" || e.volumen_klasse === state.volumen) && passt(e));
   if (!liste.length)
     return leer(d[art].length ? "Nichts gefunden. Filter anpassen." :
       art === "signale" ? "Keine frischen Signale." : "Keine aktiven Setups.");
@@ -602,6 +821,11 @@ function filterLeiste() {
   zeile2.append(mk("Alle Indizes", "index", "alle"));
   indizes.forEach(i => zeile2.append(mk(i, "index", i)));
   f.append(zeile1, zeile2);
+  if ([...state.daten.signale, ...state.daten.setups].some(e => e.volumen_klasse)) {   // nur wenn die Ergebnisdatei Volumen enthält
+    const zeile3 = el("div", {class: "row"}, el("span", {class: "meta", text: "Volumen"}));
+    [["Alle", "alle"], ["Hoch", "hoch"], ["Mittel", "mittel"], ["Niedrig", "niedrig"]].forEach(([t, w]) => zeile3.append(mk(t, "volumen", w)));
+    f.append(zeile3);
+  }
 }
 
 async function start() {
