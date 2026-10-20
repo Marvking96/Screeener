@@ -240,16 +240,27 @@ function positionAuswerten(e, p) {
   const nach = anzeigeWaehrung(e), u = v => v == null ? null : umrechnen(v, p.waehrung || waehrungVon(e), nach);
   const K = u(p.kauf), S = u(p.stop), Z = u(p.ziel), P = e.kurs != null ? e.kurs * faktor(e) : null;
   const long = Z != null ? Z > K : S != null ? S < K : true, vz = long ? 1 : -1, n = p.stueck || null;
-  const r = {K, S, Z, P, long, n, datum: p.datum || null};
+  // Kosten: Spread/Slippage je Aktie (Währung der Eingabe), Gebühren je Order in Euro
+  const sk = u(p.slipKauf) || 0, sv = u(p.slipVerkauf) || 0, je = sk + sv;
+  const inAnzeige = v => v ? umrechnen(v, "EUR", nach) : 0, gk = inAnzeige(p.gebKauf), gv = inAnzeige(p.gebVerkauf);
+  const r = {K, S, Z, P, long, n, datum: p.datum || null, sk, sv, gk, gv,
+    mitKosten: !!(sk || sv || gk || gv), kostenErfasst: p.gebKauf != null || p.gebVerkauf != null || p.slipKauf != null || p.slipVerkauf != null};
+  // Ergebnis nach Kosten, wenn zum Kurs X verkauft (Long) bzw. zurückgekauft (Short) wird
+  const netto = X => vz * n * (X - K) - n * je - gk - gv;
+  if (n) { r.einsatz = n * K + n * sk + gk; r.kosten = n * je + gk + gv; }
+  r.be = K + vz * (je + (n ? (gk + gv) / n : 0));     // Break-even: ab hier Gewinn nach Kosten
   if (P != null) {
-    r.ergProz = (P - K) / K * 100 * vz;
-    if (n) r.erg = (P - K) * n * vz;
+    if (n) { r.erg = netto(P); r.ergProz = r.erg / r.einsatz * 100; }
+    else r.ergProz = (vz * (P - K) - je) / (K + sk) * 100;
     if (S != null) r.bisStop = (S - P) / P * 100;
     if (Z != null) r.bisZiel = (Z - P) / P * 100;
   }
-  if (n && S != null) r.risiko = (S - K) * n * vz;
-  if (n && Z != null) r.chance = (Z - K) * n * vz;
-  if (S != null && Z != null) r.crv = Math.abs(Z - K) / Math.abs(K - S);
+  if (n && S != null) r.risiko = netto(S);
+  if (n && Z != null) r.chance = netto(Z);
+  if (S != null && Z != null) {
+    const verlust = n ? -r.risiko : vz * (K - S) + je, gewinn = n ? r.chance : vz * (Z - K) - je;
+    r.crv = verlust > 0 ? gewinn / verlust : null;
+  }
   const Kd = e.kurse, f = faktor(e);
   const beruehrt = (grenze, istStop) => {
     if (grenze == null) return null;
@@ -269,7 +280,7 @@ function positionAuswerten(e, p) {
   return r;
 }
 const positionFuerChart = e => { const p = position(e.kuerzel); if (!p) return null;
-  const a = positionAuswerten(e, p); return {K: a.K, S: a.S, Z: a.Z, datum: a.datum}; };
+  const a = positionAuswerten(e, p); return {K: a.K, S: a.S, Z: a.Z, BE: a.mitKosten ? a.be : null, datum: a.datum}; };
 
 function positionsBadge(e) {
   const p = position(e.kuerzel); if (!p) return null;
@@ -312,14 +323,22 @@ function positionsBlock(e) {
     const zeile = (l, w, farbe) => el("div", {class: "zeile"}, el("span", {text: l}),
       el("b", {text: w, style: farbe ? "color:var(--" + farbe + ")" : ""}));
     box.append(zeile("Kauf", g(a.K) + (a.n ? " · " + eingabeZahl(a.n) + " Stück" : "")));
-    if (a.P != null) box.append(zeile("Aktueller Kurs", g(a.P) + " · " + prozent(a.ergProz) + (a.erg != null ? " (" + (a.erg >= 0 ? "+" : "") + g(a.erg) + ")" : ""),
+    if (a.mitKosten) {
+      const kt = [];
+      if (a.gk || a.gv) kt.push("Gebühren " + g(a.gk) + " + " + g(a.gv));
+      if (a.sk || a.sv) kt.push("Spread " + g(a.sk) + " + " + g(a.sv) + " je Aktie");
+      box.append(zeile("Kosten", a.kosten != null ? g(a.kosten) : "je Aktie " + g(a.sk + a.sv)),
+        el("div", {class: "meta", style: "padding:0 0 4px;font-size:12px", text: kt.join(" · ")}));
+      box.append(zeile("Break-even", g(a.be)));
+    }
+    if (a.P != null) box.append(zeile("Aktuell" + (a.mitKosten ? " (nach Kosten)" : ""), g(a.P) + " · " + prozent(a.ergProz) + (a.erg != null ? " (" + (a.erg >= 0 ? "+" : "") + g(a.erg) + ")" : ""),
       a.ergProz >= 0 ? "long" : "short"));
     if (a.S != null) box.append(zeile("Stop " + g(a.S), a.P != null ? "noch " + g(Math.abs(a.S - a.P)) + " (" + prozent(a.bisStop) + ")" : "", "short"));
     if (a.Z != null) box.append(zeile("Ziel " + g(a.Z), a.P != null ? "noch " + g(Math.abs(a.Z - a.P)) + " (" + prozent(a.bisZiel) + ")" : "", "long"));
     if (a.risiko != null || a.chance != null || a.crv != null) {
       const teile = [];
-      if (a.risiko != null) teile.push("Risiko " + g(a.risiko));
-      if (a.chance != null) teile.push("Chance +" + g(a.chance));
+      if (a.risiko != null) teile.push("Bei Stop " + (a.risiko >= 0 ? "+" : "") + g(a.risiko));
+      if (a.chance != null) teile.push("bei Ziel " + (a.chance >= 0 ? "+" : "") + g(a.chance));
       if (a.crv != null) teile.push("CRV 1 : " + zahl.format(a.crv));
       box.append(el("div", {class: "meta", style: "padding:5px 0 0", text: teile.join(" · ")}));
     }
@@ -335,7 +354,10 @@ function positionsBlock(e) {
     }
     box.append(knoepfe);
     const umger = (p.waehrung || waehrungVon(e)) !== anzeigeWaehrung(e);
-    box.append(el("p", {class: "hint", text: "Nur zur Beobachtung, ohne Gebühren und Spread. Gespeichert nur auf diesem Gerät, bis du sie löschst." +
+    box.append(el("p", {class: "hint", text: (a.mitKosten
+        ? "Ergebnisse nach Gebühren und Spread" + (a.n ? "" : " (Gebühren erst mit Stückzahl)") + ", vor Steuern. "
+        : (a.kostenErfasst ? "Ohne Kosten (alle auf 0). " : "Noch ohne Gebühren und Spread – über „Bearbeiten“ eintragen. ")) +
+      "Gespeichert nur auf diesem Gerät, bis du sie löschst." +
       (umger ? " Eingegeben in " + (p.waehrung === "EUR" ? "€" : "$") + ", hier mit dem heutigen Wechselkurs umgerechnet." : "")}));
   };
 
@@ -361,7 +383,7 @@ function positionsBlock(e) {
         const b = el("button", {class: "chip", type: "button", text: t, "aria-pressed": String(wae === w)});
         b.addEventListener("click", () => {
           if (w === wae) return;
-          ["kauf", "stop", "ziel"].forEach(id => { const v = parseZahl(f[id].value); if (v != null && !Number.isNaN(v)) f[id].value = eingabeZahl(umrechnen(v, wae, w)); });
+          ["kauf", "stop", "ziel", "slipKauf", "slipVerkauf"].forEach(id => { const v = parseZahl(f[id].value); if (v != null && !Number.isNaN(v)) f[id].value = eingabeZahl(umrechnen(v, wae, w)); });
           wae = w; chips.forEach(c => c.setAttribute("aria-pressed", String(c.dataset.w === wae)));
           labels.forEach(([sp, t]) => sp.textContent = t + " (" + zeichenW() + ")");
         });
@@ -374,19 +396,28 @@ function positionsBlock(e) {
       feld("kauf", "Kaufkurs", kaufStd), feld("stop", "Stop", stopStd),
       feld("ziel", "Kursziel", p ? p.ziel : null), feld("stueck", "Stückzahl (optional)", p ? p.stueck : null),
       feld("datum", "Kaufdatum", p ? p.datum : (state.daten.letzter_handelstag || e.stand), "date"));
-    [["kauf", "Kaufkurs"], ["stop", "Stop"], ["ziel", "Kursziel"]].forEach(([id, t]) => {
+    // Kosten: bei neuer Position aus dem Rechner übernehmen, sonst 1 € je Order (Trade Republic)
+    const rech = speicher.lies("rechner", {}), ausRechner = id => { const v = istObjekt(rech) ? parseZahl(rech[id]) : null; return v == null || Number.isNaN(v) ? null : v; };
+    const kostStd = (id, std) => p ? (p[id] != null ? p[id] : (p.gebKauf == null && p.slipKauf == null ? std : null)) : (ausRechner(id) != null ? ausRechner(id) : std);
+    const slipStd = id => p ? kostStd(id, null) : null;   // Spread ist je Aktie verschieden, daher nicht aus dem Rechner
+    const kostenGitter = el("div", {class: "grid2", style: "margin-top:10px"},
+      feld("gebKauf", "Gebühr Kauf (€)", kostStd("gebKauf", 1)), feld("gebVerkauf", "Gebühr Verkauf (€)", kostStd("gebVerkauf", 1)),
+      feld("slipKauf", "Spread Kauf je Aktie", slipStd("slipKauf")), feld("slipVerkauf", "Spread Verkauf je Aktie", slipStd("slipVerkauf")));
+    [["kauf", "Kaufkurs"], ["stop", "Stop"], ["ziel", "Kursziel"], ["slipKauf", "Spread Kauf je Aktie"], ["slipVerkauf", "Spread Verkauf je Aktie"]].forEach(([id, t]) => {
       const sp = f[id].previousSibling; labels.push([sp, t]); sp.textContent = t + " (" + zeichenW() + ")";
     });
-    teile.push(gitter);
+    teile.push(gitter, el("div", {class: "meta", style: "margin-top:10px;font-weight:650;color:var(--text)", text: "Kosten"}), kostenGitter,
+      el("p", {class: "hint", text: "Spread je Aktie = halbe Differenz zwischen Geld- und Briefkurs (wie im Rechner). Gebühren werden erst mit Stückzahl eingerechnet."}));
     const fehl = el("div", {class: "fehl", style: "margin-top:8px"});
     const speichernKnopf = el("button", {class: "knopf", type: "button", text: "Speichern"});
     const abbrechen = el("button", {class: "knopf", type: "button", text: "Abbrechen"});
     abbrechen.addEventListener("click", () => { modus = "anzeige"; render(); });
     speichernKnopf.addEventListener("click", () => {
-      const w = {}, namen = {kauf: "Kaufkurs", stop: "Stop", ziel: "Kursziel", stueck: "Stückzahl"};
+      const w = {}, namen = {kauf: "Kaufkurs", stop: "Stop", ziel: "Kursziel", stueck: "Stückzahl",
+        gebKauf: "Gebühr Kauf", gebVerkauf: "Gebühr Verkauf", slipKauf: "Spread Kauf", slipVerkauf: "Spread Verkauf"};
       for (const id of Object.keys(namen)) {
-        const v = parseZahl(f[id].value);
-        if (v !== null && (Number.isNaN(v) || v <= 0)) { fehl.textContent = namen[id] + ": bitte eine positive Zahl eingeben (z. B. 12,50)."; return; }
+        const v = parseZahl(f[id].value), kosten = id.startsWith("geb") || id.startsWith("slip");
+        if (v !== null && (Number.isNaN(v) || (!kosten && v <= 0))) { fehl.textContent = namen[id] + ": bitte eine " + (kosten ? "" : "positive ") + "Zahl eingeben (z. B. 12,50)."; return; }
         w[id] = v;
       }
       if (!w.kauf) { fehl.textContent = "Bitte einen Kaufkurs eingeben."; return; }
@@ -396,7 +427,8 @@ function positionsBlock(e) {
         fehl.textContent = "Stop und Kursziel müssen auf verschiedenen Seiten des Kaufkurses liegen (Long: Stop darunter, Ziel darüber)."; return;
       }
       const datum = /^\d{4}-\d{2}-\d{2}$/.test(f.datum.value) ? f.datum.value : null;
-      positionSpeichern(k, {kauf: w.kauf, stop: w.stop, ziel: w.ziel, stueck: w.stueck, waehrung: wae, datum});
+      positionSpeichern(k, {kauf: w.kauf, stop: w.stop, ziel: w.ziel, stueck: w.stueck, waehrung: wae, datum,
+        gebKauf: w.gebKauf || 0, gebVerkauf: w.gebVerkauf || 0, slipKauf: w.slipKauf || 0, slipVerkauf: w.slipVerkauf || 0});
       if (!istMerk(k)) merkeUm(k);
       modus = "anzeige"; loeschFrage = false; zeichne();
     });
@@ -465,7 +497,7 @@ function chartBauen(e, R, opt) {
   const farbe = long ? "var(--long)" : "var(--short)";
   const p2 = R.p2, p3 = R.p3;
   const pos = opt.position || null;
-  const alle = h.concat(l, [p2, p3], pos ? [pos.K, pos.S, pos.Z].filter(v => v != null) : []);
+  const alle = h.concat(l, [p2, p3], pos ? [pos.K, pos.S, pos.Z, pos.BE].filter(v => v != null) : []);
   let lo = Math.min(...alle), hi = Math.max(...alle);
   const pad = (hi - lo) * 0.14 || 1; lo -= pad; hi += pad;
   const auto = {lo, hi};
@@ -511,6 +543,8 @@ function chartBauen(e, R, opt) {
     [[pos.Z, "var(--long)"], [pos.S, "var(--short)"], [pos.K, "var(--accent)"]].forEach(([v, col]) => {
       if (v != null) P.append(sv("line", {x1: xs, x2: xe, y1: y(v), y2: y(v), stroke: col, "stroke-width": 1.4, class: "poslinie"}));
     });
+    if (pos.BE != null) P.append(sv("line", {x1: xs, x2: xe, y1: y(pos.BE), y2: y(pos.BE), stroke: "var(--accent)", "stroke-width": 1,
+      "stroke-dasharray": "2 3", class: "poslinie be"}));
     if (i0 >= 0 && pos.datum && pos.datum >= d[0]) P.append(sv("circle", {cx: xs, cy: y(pos.K), r: 3.5, fill: "var(--accent)", stroke: "var(--card)", "stroke-width": 1}));
   }
   // Beschriftungen rechts, ohne dass sie sich überlappen
@@ -518,7 +552,7 @@ function chartBauen(e, R, opt) {
     {y: y(p2) + 4, text: "2: " + zahl.format(p2), col: farbe, fett: 600},
     {y: y(p3) + 4, text: "3: " + zahl.format(p3), col: "var(--muted)", fett: 600},
     {y: y(c[n - 1]) + 4, text: zahl.format(c[n - 1]), col: "var(--accent)", fett: 400},
-    ...(pos ? [[pos.K, "K", "var(--accent)"], [pos.S, "S", "var(--short)"], [pos.Z, "Z", "var(--long)"]]
+    ...(pos ? [[pos.K, "K", "var(--accent)"], [pos.S, "S", "var(--short)"], [pos.Z, "Z", "var(--long)"], [pos.BE, "BE", "var(--accent)"]]
       .filter(([v]) => v != null).map(([v, t, col]) => ({y: y(v) + 4, text: t + " " + zahl.format(v), col, fett: 700})) : []),
   ].filter(b => b.y - 4 >= pt - 2 && b.y - 4 <= preisUnten + 2).sort((a, b) => a.y - b.y);
   for (let k = 1; k < beschr.length; k++) if (beschr[k].y - beschr[k - 1].y < 13) beschr[k].y = beschr[k - 1].y + 13;
