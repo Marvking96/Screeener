@@ -105,6 +105,8 @@ svg{width:100%;height:auto;display:block}
 .vb-kopf .rechts-aus{margin-left:auto}
 .vb-flaeche{flex:1;position:relative;min-height:0;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
 .vb-flaeche svg{position:absolute;inset:0;width:100%;height:100%}
+.vb-flaeche svg.fk{pointer-events:none;z-index:1}
+.vb-flaeche{-webkit-touch-callout:none}
 .vb-fuss{color:var(--muted);font-size:12px;padding:6px 12px 8px;border-top:1px solid var(--line)}
 .hint{color:var(--muted);font-size:12px;margin:6px 0 0}
 .empty{color:var(--muted);text-align:center;padding:36px 12px}
@@ -219,7 +221,8 @@ function reihen(e) {
     hatKerzen: !!(K.o && K.h && K.l)};
 }
 
-// zeichnet den Chart für einen Ausschnitt; opt: W, H, start, anzahl, kerzen, volumen, volAnteil, wahl, pr
+let clipZaehler = 0;
+// zeichnet den Chart für einen Ausschnitt; opt: W, H, start, anzahl, kerzen, volumen, volAnteil, wahl, pr, preis {lo,hi}, achse
 function chartBauen(e, R, opt) {
   const W = opt.W, H = opt.H, pl = 8, pr = opt.pr || 58, pt = 14, pb = 24;
   const gesamt = R.c.length;
@@ -239,6 +242,9 @@ function chartBauen(e, R, opt) {
   const alle = h.concat(l, [p2, p3]);
   let lo = Math.min(...alle), hi = Math.max(...alle);
   const pad = (hi - lo) * 0.14 || 1; lo -= pad; hi += pad;
+  const auto = {lo, hi};
+  if (opt.preis) { lo = opt.preis.lo; hi = opt.preis.hi; }
+  const dez = (hi - lo) < 0.6 ? 3 : 2, fmt = v => v.toLocaleString("de-DE", {minimumFractionDigits: dez, maximumFractionDigits: dez});
   const pitch = (W - pl - pr) / n;
   const x = i => pl + pitch * (i + 0.5);
   const y = v => pt + (preisUnten - pt) * (1 - (v - lo) / (hi - lo));
@@ -250,9 +256,22 @@ function chartBauen(e, R, opt) {
   if (wi >= 0 && wi < n)
     s.append(sv("rect", {x: x(wi) - Math.max(pitch / 2, 3), y: pt, width: Math.max(pitch, 6), height: unten - pt,
       fill: "var(--accent)", opacity: 0.16}));
+  // optionale Preisachse mit feinem Raster (Vollbild)
+  const ticks = [];
+  if (opt.achse) {
+    const roh = (hi - lo) / Math.max(3, Math.floor((preisUnten - pt) / 48)), mag = Math.pow(10, Math.floor(Math.log10(roh))), fr = roh / mag;
+    const step = (fr < 1.5 ? 1 : fr < 3.5 ? 2 : fr < 7.5 ? 5 : 10) * mag, k0 = Math.ceil(lo / step);
+    for (let k = k0; k * step <= hi; k++) ticks.push(k * step);
+    ticks.forEach(v => s.append(sv("line", {x1: pl, x2: W - pr, y1: y(v), y2: y(v), stroke: "var(--line)", "stroke-width": 0.6, opacity: 0.7})));
+  }
+  // alles, was zum Preisbereich gehört, wird an dessen Rand abgeschnitten (wichtig beim vertikalen Zoom)
+  const cid = "kp" + (++clipZaehler), P = sv("g", {"clip-path": "url(#" + cid + ")"});
+  s.append(sv("defs", {}), P);
+  s.firstChild.append(sv("clipPath", {id: cid}));
+  s.firstChild.firstChild.append(sv("path", {d: "M" + pl + " " + pt + "H" + (W - pr) + "V" + Math.max(pt + 1, preisUnten) + "H" + pl + "Z"}));
   // Hilfslinien für Punkt 2 und Punkt 3
   [[p2, farbe], [p3, "var(--muted)"]].forEach(([wert, col]) => {
-    s.append(sv("line", {x1: pl, x2: W - pr, y1: y(wert), y2: y(wert), stroke: col, "stroke-width": 1,
+    P.append(sv("line", {x1: pl, x2: W - pr, y1: y(wert), y2: y(wert), stroke: col, "stroke-width": 1,
       "stroke-dasharray": "4 3", opacity: 0.8}));
   });
   // Beschriftungen rechts, ohne dass sie sich überlappen
@@ -260,14 +279,16 @@ function chartBauen(e, R, opt) {
     {y: y(p2) + 4, text: "2: " + zahl.format(p2), col: farbe, fett: 600},
     {y: y(p3) + 4, text: "3: " + zahl.format(p3), col: "var(--muted)", fett: 600},
     {y: y(c[n - 1]) + 4, text: zahl.format(c[n - 1]), col: "var(--accent)", fett: 400},
-  ].sort((a, b) => a.y - b.y);
+  ].filter(b => b.y - 4 >= pt - 2 && b.y - 4 <= preisUnten + 2).sort((a, b) => a.y - b.y);
   for (let k = 1; k < beschr.length; k++) if (beschr[k].y - beschr[k - 1].y < 13) beschr[k].y = beschr[k - 1].y + 13;
   const maxY = preisUnten - 2;
-  if (beschr[beschr.length - 1].y > maxY) {
+  if (beschr.length && beschr[beschr.length - 1].y > maxY) {
     beschr[beschr.length - 1].y = maxY;
     for (let k = beschr.length - 2; k >= 0; k--) if (beschr[k + 1].y - beschr[k].y < 13) beschr[k].y = beschr[k + 1].y - 13;
   }
   beschr.forEach(b => s.append(sv("text", {x: W - pr + 4, y: b.y, fill: b.col, "font-size": 11, "font-weight": b.fett}, b.text)));
+  ticks.forEach(v => { if (!beschr.some(b => Math.abs(b.y - (y(v) + 4)) < 12))
+    s.append(sv("text", {x: W - pr + 4, y: y(v) + 4, fill: "var(--muted)", "font-size": 10}, fmt(v))); });
   const steigt = i => kerzen ? c[i] >= o[i] : (i === 0 || c[i] >= c[i - 1]);
   // Volumenbalken
   if (mitVol) {
@@ -282,17 +303,17 @@ function chartBauen(e, R, opt) {
   if (kerzen) {
     for (let i = 0; i < n; i++) {
       const col = steigt(i) ? "var(--long)" : "var(--short)", cx = x(i);
-      s.append(sv("line", {x1: cx, x2: cx, y1: y(h[i]), y2: y(l[i]), stroke: col, "stroke-width": pitch < 3 ? 0.8 : 1}));
+      P.append(sv("line", {x1: cx, x2: cx, y1: y(h[i]), y2: y(l[i]), stroke: col, "stroke-width": pitch < 3 ? 0.8 : 1}));
       const oben = y(Math.max(o[i], c[i])), hoehe = Math.max(1, y(Math.min(o[i], c[i])) - oben);
-      s.append(sv("rect", {x: cx - bw / 2, y: oben, width: bw, height: hoehe, fill: col}));
+      P.append(sv("rect", {x: cx - bw / 2, y: oben, width: bw, height: hoehe, fill: col}));
     }
     // aktueller Schlusskurs als feine Linie
-    s.append(sv("line", {x1: x(n - 1), x2: W - pr, y1: y(c[n - 1]), y2: y(c[n - 1]), stroke: "var(--accent)", "stroke-width": 1}));
+    P.append(sv("line", {x1: x(n - 1), x2: W - pr, y1: y(c[n - 1]), y2: y(c[n - 1]), stroke: "var(--accent)", "stroke-width": 1}));
   } else {
     const pts = c.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
-    s.append(sv("polyline", {points: pts, fill: "none", stroke: "var(--chart)", "stroke-width": 1.6,
+    P.append(sv("polyline", {points: pts, fill: "none", stroke: "var(--chart)", "stroke-width": 1.6,
       "stroke-linejoin": "round", "stroke-linecap": "round"}));
-    s.append(sv("circle", {cx: x(n - 1), cy: y(c[n - 1]), r: 3, fill: "var(--accent)"}));
+    P.append(sv("circle", {cx: x(n - 1), cy: y(c[n - 1]), r: 3, fill: "var(--accent)"}));
   }
   // Punkte 1-2-3 (nach Schlusskurs; Nummer außerhalb der Kerze)
   for (const p of e.kette) {
@@ -300,14 +321,14 @@ function chartBauen(e, R, opt) {
     const hoch = long ? p.nr === 2 : p.nr !== 2;
     const cx = x(i), cy = y(p.c * R.f);
     const oy = (hoch ? y(h[i]) - 13 : y(l[i]) + 13);
-    s.append(sv("circle", {cx: cx, cy: cy, r: 2.6, fill: farbe, stroke: "var(--card)", "stroke-width": 1}));
-    s.append(sv("circle", {cx: cx, cy: oy, r: 8, fill: farbe}));
-    s.append(sv("text", {x: cx, y: oy + 4, "text-anchor": "middle", fill: "#fff", "font-size": 11, "font-weight": 700}, String(p.nr)));
+    P.append(sv("circle", {cx: cx, cy: cy, r: 2.6, fill: farbe, stroke: "var(--card)", "stroke-width": 1}));
+    P.append(sv("circle", {cx: cx, cy: oy, r: 8, fill: farbe}));
+    P.append(sv("text", {x: cx, y: oy + 4, "text-anchor": "middle", fill: "#fff", "font-size": 11, "font-weight": 700}, String(p.nr)));
   }
   // Ausbruchstag
   if (e.signaltag) {
     const i = d.indexOf(e.signaltag);
-    if (i >= 0) s.append(sv("text", {x: x(i), y: long ? y(h[i]) - 6 : y(l[i]) + 17, "text-anchor": "middle",
+    if (i >= 0) P.append(sv("text", {x: x(i), y: long ? y(h[i]) - 6 : y(l[i]) + 17, "text-anchor": "middle",
       fill: "var(--accent)", "font-size": 16}, "★"));
   }
   // Datumsachse
@@ -315,7 +336,10 @@ function chartBauen(e, R, opt) {
     s.append(sv("text", {x: x(i), y: H - 6, "text-anchor": k === 0 ? "start" : k === 2 ? "end" : "middle",
       fill: "var(--muted)", "font-size": 10}, kurzDatum(d[i])));
   });
-  return {svg: s, s0, m, pitch, W, kerzen,
+  return {svg: s, s0, m, pitch, W, H, pr, pl, pt, preisUnten, kerzen, n, bereich: {lo, hi}, auto, fmt,
+    preisAus: yy => hi - (Math.max(pt, Math.min(preisUnten, yy)) - pt) / (preisUnten - pt) * (hi - lo),
+    yVon: y, xVon: ab => x(ab - s0),
+    indexVonX: rx => s0 + Math.max(0, Math.min(n - 1, Math.floor((rx - pl) / pitch))),
     // Tag (absoluter Index) unter einer Bildschirmposition
     indexAus: cx => {
       const r = s.getBoundingClientRect();
@@ -356,18 +380,20 @@ function popupBauen(e, R, abs, bau, akt) {
 }
 const VOLUMEN_TAGE_ANZEIGE = 20;
 
-// Vollbild: Chart über den ganzen Bildschirm, Zoom mit zwei Fingern oder Mausrad, Verschieben mit einem Finger
+// Vollbild: Chart über den ganzen Bildschirm. Zoom waagrecht und senkrecht, Verschieben, Fadenkreuz mit Kurs und Datum
 function vollbild(e) {
   const R = reihen(e), gesamt = R.c.length, MIN = Math.min(10, gesamt);
   let anzahl = fensterGroesse(e, gesamt), start = gesamt - anzahl, wahl = null, bau = null, raf = 0;
+  let manuell = null, fk = null, fkModus = false, zuletztManuell = false;
   const ueber = el("div", {class: "vollbild", role: "dialog", "aria-label": "Chart " + e.name});
   const flaeche = el("div", {class: "vb-flaeche"});
   const kopf = el("div", {class: "vb-kopf"});
+  const fkSvg = sv("svg", {class: "fk", "aria-hidden": "true"});
+  const vorher = document.body.style.overflow;
   const schliessen = () => {
     window.removeEventListener("resize", planen); window.removeEventListener("keydown", taste);
-    document.body.style.overflow = vorher; ueber.remove();
+    clearTimeout(halteTimer); document.body.style.overflow = vorher; ueber.remove();
   };
-  const vorher = document.body.style.overflow;
   const chip = (text, label, fn, an) => {
     const b = el("button", {class: "chip", type: "button", text: text, "aria-label": label, "aria-pressed": String(!!an)});
     b.addEventListener("click", fn); return b;
@@ -378,73 +404,161 @@ function vollbild(e) {
       kopf.append(chip("Kerzen", "Kerzenansicht", () => { state.ansicht = "kerzen"; speicher.schreib("ansicht", "kerzen"); kopfFuellen(); zeichneVB(); }, state.ansicht === "kerzen"),
         chip("Linie", "Linienansicht", () => { state.ansicht = "linie"; speicher.schreib("ansicht", "linie"); kopfFuellen(); zeichneVB(); }, state.ansicht !== "kerzen"));
     }
-    kopf.append(chip("−", "Herauszoomen", () => zoomEnde(1 / 0.7)), chip("+", "Hineinzoomen", () => zoomEnde(0.7)),
-      chip("Alles", "Alles anzeigen", () => { anzahl = gesamt; start = 0; zeichneVB(); }),
+    kopf.append(chip("✛ Fadenkreuz", "Fadenkreuz-Modus: Finger zeigt sofort Kurs und Datum", () => { fkModus = !fkModus; kopfFuellen(); }, fkModus),
+      chip("−", "Waagrecht herauszoomen", () => zoomEnde(1 / 0.7)), chip("+", "Waagrecht hineinzoomen", () => zoomEnde(0.7)),
+      chip("↕−", "Senkrecht herauszoomen", () => zoomY(1 / 0.7, null)), chip("↕+", "Senkrecht hineinzoomen", () => zoomY(0.7, null)));
+    if (manuell) kopf.append(chip("Auto ↕", "Preisachse wieder automatisch", () => { manuell = null; zeichneVB(); }));
+    kopf.append(chip("Alles", "Alles anzeigen", () => { anzahl = gesamt; start = 0; manuell = null; fk = null; zeichneVB(); }),
       chip("✕ Schließen", "Vollbild schließen", schliessen));
     kopf.lastChild.classList.add("rechts-aus");
+    zuletztManuell = !!manuell;
   };
-  const zoomEnde = f => {                       // Zoom um den gewählten Tag, sonst um das rechte Ende
+  const zoomEnde = f => {                       // waagrecht: um den gewählten Tag, sonst um das rechte Ende
     const anker = wahl != null ? wahl : start + anzahl - 1, anteil = (anker - start) / anzahl;
-    anzahl = Math.max(MIN, Math.min(gesamt, anzahl * f)); start = anker - anteil * anzahl; zeichneVB();
+    anzahl = Math.max(MIN, Math.min(gesamt, anzahl * f)); start = anker - anteil * anzahl; fk = null; zeichneVB();
+  };
+  const spanKlemmen = sp => { const A = bau.auto.hi - bau.auto.lo; return Math.max(A * 0.02, Math.min(A * 20, sp)); };
+  const zoomY = (f, yRel) => {                  // senkrecht: um die Kurshöhe unter dem Finger (sonst Mitte)
+    if (!bau) return;
+    const b0 = manuell || bau.bereich, span = b0.hi - b0.lo;
+    const t = yRel == null ? 0.5 : Math.max(0, Math.min(1, (yRel - bau.pt) / (bau.preisUnten - bau.pt)));
+    const ankerPreis = b0.hi - t * span, ns = spanKlemmen(span * f), hi = ankerPreis + t * ns;
+    manuell = {lo: hi - ns, hi}; fk = null; planen();
   };
   const klemmen = () => { anzahl = Math.max(MIN, Math.min(gesamt, anzahl)); start = Math.max(0, Math.min(gesamt - anzahl, start)); };
+
   function zeichneVB() {
     klemmen();
     const W = Math.max(260, flaeche.clientWidth), H = Math.max(180, flaeche.clientHeight);
     bau = chartBauen(e, R, {W, H, start, anzahl, kerzen: state.ansicht === "kerzen", volumen: true, volAnteil: 0.2,
-      wahl, pr: W > 600 ? 64 : 58});
-    flaeche.replaceChildren(bau.svg);
+      wahl, pr: W > 600 ? 64 : 58, preis: manuell, achse: true});
+    fkSvg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    flaeche.replaceChildren(bau.svg, fkSvg);
     if (wahl != null) {
       const gehe = d => { wahl = Math.max(0, Math.min(gesamt - 1, wahl + d));
-        if (wahl < start) start = wahl; else if (wahl > start + anzahl - 1) start = wahl - anzahl + 1; zeichneVB(); };
-      flaeche.append(popupBauen(e, R, wahl, bau, {zurueck: () => gehe(-1), vor: () => gehe(1), zu: () => { wahl = null; zeichneVB(); }}));
+        if (wahl < start) start = wahl; else if (wahl > start + anzahl - 1) start = wahl - anzahl + 1;
+        fk = null; zeichneVB(); fk = {x: bau.xVon(wahl), y: bau.yVon(R.c[wahl])}; fadenkreuz(); };
+      flaeche.append(popupBauen(e, R, wahl, bau, {zurueck: () => gehe(-1), vor: () => gehe(1), zu: () => { wahl = null; fk = null; zeichneVB(); }}));
     }
+    fadenkreuz();
+    if (!!manuell !== zuletztManuell) kopfFuellen();
+  }
+  // Fadenkreuz: senkrechte Linie rastet auf den Tag ein, waagrechte folgt dem Finger; Kurs rechts, Datum unten
+  function fadenkreuz() {
+    fkSvg.replaceChildren();
+    if (!fk || !bau) return;
+    const b = bau, idx = b.indexVonX(fk.x), cx = b.xVon(idx), yy = Math.max(b.pt, Math.min(b.preisUnten, fk.y));
+    const unten = b.H - 24, preis = b.preisAus(yy), z = zeichenVon(e), ln = {stroke: "var(--text)", "stroke-width": 0.8, "stroke-dasharray": "3 3", opacity: 0.75};
+    fkSvg.append(sv("line", {...ln, x1: cx, x2: cx, y1: b.pt, y2: unten}), sv("line", {...ln, x1: b.pl, x2: b.W - b.pr, y1: yy, y2: yy}));
+    const pt = b.fmt(preis), pw = b.pr - 2;
+    fkSvg.append(sv("rect", {x: b.W - b.pr + 1, y: yy - 8, width: pw, height: 16, rx: 3, fill: "var(--accent)"}),
+      sv("text", {x: b.W - b.pr + 1 + pw / 2, y: yy + 4, "text-anchor": "middle", fill: "#fff", "font-size": 11, "font-weight": 650}, pt));
+    const dt = datumLang(R.d[idx]), dw = dt.length * 6.3 + 14, dx = Math.max(dw / 2, Math.min(b.W - dw / 2, cx));
+    fkSvg.append(sv("rect", {x: dx - dw / 2, y: b.H - 22, width: dw, height: 18, rx: 3, fill: "var(--accent)"}),
+      sv("text", {x: dx, y: b.H - 9, "text-anchor": "middle", fill: "#fff", "font-size": 11, "font-weight": 650}, dt));
+    const f = v => zahl.format(v);
+    const info = b.kerzen ? "Er " + f(R.o[idx]) + " · Ho " + f(R.h[idx]) + " · Ti " + f(R.l[idx]) + " · Sc " + f(R.c[idx])
+      : "Schluss " + f(R.c[idx]);
+    fkSvg.append(sv("rect", {x: 0, y: 0, width: b.W, height: 14, fill: "var(--bg)", opacity: 0.85}),
+      sv("text", {x: b.pl + 2, y: 10.5, fill: "var(--text)", "font-size": 10}, info + (R.v && R.v[idx] > 0 ? " · Vol " + volText(R.v[idx]) : "")));
   }
   function planen() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; zeichneVB(); }); }
   const taste = ev => { if (ev.key === "Escape") schliessen(); };
 
-  // Gesten: ein Finger = verschieben (kurzes Antippen = Tag wählen), zwei Finger = zoomen
-  const zeiger = new Map(); let pinch = null, bewegt = false, t0 = 0, startX = 0;
+  // Gesten: ein Finger = verschieben, kurz halten = Fadenkreuz, Tippen = Tag wählen,
+  // zwei Finger = zoomen (waagrecht und senkrecht getrennt), Preisachse rechts ziehen = senkrecht zoomen
+  const zeiger = new Map(); let pinch = null, art = null, bewegt = false, t0 = 0, startPos = null, halteTimer = 0, letzterAchsTipp = 0;
+  const rel = (cx, cy) => { const r = flaeche.getBoundingClientRect(); return {x: (cx - r.left) * (bau ? bau.W : r.width) / (r.width || 1), y: (cy - r.top) * (bau ? bau.H : r.height) / (r.height || 1)}; };
+  flaeche.addEventListener("contextmenu", ev => ev.preventDefault());
   flaeche.addEventListener("pointerdown", ev => {
+    if (ev.pointerType === "mouse" && ev.button !== 0) return;
     try { flaeche.setPointerCapture(ev.pointerId); } catch (_) {}
     zeiger.set(ev.pointerId, {x: ev.clientX, y: ev.clientY});
-    if (zeiger.size === 1) { bewegt = false; t0 = Date.now(); startX = ev.clientX; }
-    if (zeiger.size === 2) {
-      const [a, b] = [...zeiger.values()], r = flaeche.getBoundingClientRect();
-      const anteil = Math.max(0, Math.min(1, ((a.x + b.x) / 2 - r.left - 8) / Math.max(1, r.width - 66)));
-      pinch = {abstand: Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)), anzahl, anteil, ankerIdx: start + anteil * anzahl};
-      bewegt = true;
+    if (zeiger.size === 1) {
+      bewegt = false; t0 = Date.now(); startPos = {x: ev.clientX, y: ev.clientY};
+      const p = rel(ev.clientX, ev.clientY);
+      if (bau && p.x > bau.W - bau.pr) art = "achse";
+      else if (fkModus) { art = "fk"; wahl = null; fk = p; zeichneVB(); }
+      else {
+        art = "schieben";
+        halteTimer = setTimeout(() => {
+          const z = [...zeiger.values()][0];
+          if (!bewegt && zeiger.size === 1 && z) { art = "fk"; wahl = null; fk = rel(z.x, z.y); zeichneVB(); }
+        }, 260);
+      }
+    } else if (zeiger.size === 2 && bau) {
+      clearTimeout(halteTimer); art = "pinch"; bewegt = true; fk = null;
+      const [a, b] = [...zeiger.values()], r = flaeche.getBoundingClientRect(), b0 = manuell || bau.bereich;
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, breite = Math.max(1, r.width - bau.pl - bau.pr);
+      const anteil = Math.max(0, Math.min(1, (mx - r.left - bau.pl) / breite));
+      const t = Math.max(0, Math.min(1, (my - r.top - bau.pt) / (bau.preisUnten - bau.pt)));
+      pinch = {ax: Math.abs(a.x - b.x), ay: Math.abs(a.y - b.y), abstand: Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)),
+        anzahl, ankerIdx: start + anteil * anzahl, b0, ankerPreis: b0.hi - t * (b0.hi - b0.lo)};
     }
   });
   flaeche.addEventListener("pointermove", ev => {
-    const z = zeiger.get(ev.pointerId); if (!z) return;
-    const alt = {x: z.x, y: z.y}; z.x = ev.clientX; z.y = ev.clientY;
+    const z = zeiger.get(ev.pointerId);
+    if (!z) {                                           // Maus ohne gedrückte Taste: Fadenkreuz folgt dem Zeiger
+      if (ev.pointerType === "mouse" && zeiger.size === 0 && bau) {
+        const p = rel(ev.clientX, ev.clientY); fk = p.x < bau.W - bau.pr ? p : null; fadenkreuz();
+      }
+      return;
+    }
+    const dx = ev.clientX - z.x, dy = ev.clientY - z.y; z.x = ev.clientX; z.y = ev.clientY;
     if (zeiger.size === 1) {
-      if (Math.abs(ev.clientX - startX) > 6) bewegt = true;
-      if (bewegt && bau) { start -= (ev.clientX - alt.x) / bau.pitch; planen(); }
-    } else if (zeiger.size === 2 && pinch) {
-      const [a, b] = [...zeiger.values()], abstand = Math.max(10, Math.hypot(a.x - b.x, a.y - b.y));
-      anzahl = Math.max(MIN, Math.min(gesamt, pinch.anzahl * pinch.abstand / abstand));
-      start = pinch.ankerIdx - pinch.anteil * anzahl; planen();
+      if (!bewegt && Math.hypot(ev.clientX - startPos.x, ev.clientY - startPos.y) > 6) { bewegt = true; if (art === "schieben") clearTimeout(halteTimer); }
+      if (art === "fk") { fk = rel(ev.clientX, ev.clientY); fadenkreuz(); }
+      else if (art === "achse") { if (bewegt && bau) { zoomY(Math.exp(dy * 0.006), null); } }
+      else if (art === "schieben" && bewegt && bau) {
+        start -= dx / bau.pitch;
+        if (manuell) { const per = (manuell.hi - manuell.lo) / (bau.preisUnten - bau.pt); manuell = {lo: manuell.lo + dy * per, hi: manuell.hi + dy * per}; }
+        fk = null; planen();
+      }
+    } else if (zeiger.size === 2 && pinch && bau) {
+      const [a, b] = [...zeiger.values()], r = flaeche.getBoundingClientRect();
+      const nx = Math.abs(a.x - b.x), ny = Math.abs(a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const breite = Math.max(1, r.width - bau.pl - bau.pr), anteilJetzt = (mx - r.left - bau.pl) / breite;
+      if (pinch.ax >= 40) anzahl = Math.max(MIN, Math.min(gesamt, pinch.anzahl * pinch.ax / Math.max(10, nx)));
+      else if (pinch.ay < 40) anzahl = Math.max(MIN, Math.min(gesamt, pinch.anzahl * pinch.abstand / Math.max(10, Math.hypot(a.x - b.x, a.y - b.y))));
+      start = pinch.ankerIdx - Math.max(0, Math.min(1, anteilJetzt)) * anzahl;
+      if (pinch.ay >= 40) {
+        const span0 = pinch.b0.hi - pinch.b0.lo, ns = spanKlemmen(span0 * pinch.ay / Math.max(10, ny));
+        const t = Math.max(0, Math.min(1, (my - r.top - bau.pt) / (bau.preisUnten - bau.pt))), hi = pinch.ankerPreis + t * ns;
+        manuell = {lo: hi - ns, hi};
+      }
+      planen();
     }
   });
   const ende = ev => {
     const z = zeiger.get(ev.pointerId); if (!z) return;
-    const tipp = zeiger.size === 1 && !bewegt && Date.now() - t0 < 500 && ev.type === "pointerup";
+    clearTimeout(halteTimer);
+    const vorArt = art, allein = zeiger.size === 1, hoch = ev.type === "pointerup";
+    const tipp = allein && !bewegt && Date.now() - t0 < 500 && hoch;
     zeiger.delete(ev.pointerId);
     if (zeiger.size < 2) pinch = null;
-    if (tipp && bau) { wahl = bau.indexAus(ev.clientX); zeichneVB(); }
+    if (zeiger.size > 0) return;
+    if (hoch && bau) {
+      if (vorArt === "fk" && fk) { wahl = bau.indexVonX(fk.x); zeichneVB(); }
+      else if (vorArt === "schieben" && tipp) { const p = rel(ev.clientX, ev.clientY); wahl = bau.indexVonX(p.x); fk = p; zeichneVB(); }
+      else if (vorArt === "achse" && tipp) {
+        if (Date.now() - letzterAchsTipp < 400) { manuell = null; fk = null; zeichneVB(); letzterAchsTipp = 0; } else letzterAchsTipp = Date.now();
+      }
+    }
+    art = null;
   };
   flaeche.addEventListener("pointerup", ende); flaeche.addEventListener("pointercancel", ende);
+  flaeche.addEventListener("pointerleave", ev => { if (ev.pointerType === "mouse" && zeiger.size === 0 && fk) { fk = null; fadenkreuz(); } });
   flaeche.addEventListener("wheel", ev => {
-    ev.preventDefault();
-    const r = flaeche.getBoundingClientRect(), anteil = Math.max(0, Math.min(1, (ev.clientX - r.left - 8) / Math.max(1, r.width - 66)));
+    ev.preventDefault(); if (!bau) return;
+    const r = flaeche.getBoundingClientRect(), p = rel(ev.clientX, ev.clientY), d = ev.deltaY || ev.deltaX;
+    if (ev.shiftKey || p.x > bau.W - bau.pr) { zoomY(Math.exp(d * 0.002), p.y); return; }
+    const anteil = Math.max(0, Math.min(1, (ev.clientX - r.left - bau.pl) / Math.max(1, r.width - bau.pl - bau.pr)));
     const ankerIdx = start + anteil * anzahl;
-    anzahl = Math.max(MIN, Math.min(gesamt, anzahl * Math.exp(ev.deltaY * 0.002))); start = ankerIdx - anteil * anzahl; planen();
+    anzahl = Math.max(MIN, Math.min(gesamt, anzahl * Math.exp(d * 0.002))); start = ankerIdx - anteil * anzahl; fk = null; planen();
   }, {passive: false});
 
   ueber.append(kopf, flaeche,
-    el("div", {class: "vb-fuss", text: "Tippen = Tag wählen · Ziehen = verschieben · zwei Finger oder Mausrad = zoomen. Tipp: Handy quer halten."}));
+    el("div", {class: "vb-fuss", text: "Tippen: Tag wählen · kurz halten und ziehen: Fadenkreuz · Ziehen: verschieben · zwei Finger: zoomen (waagrecht und senkrecht) · Preisachse rechts ziehen: Höhe. Tipp: Handy quer halten."}));
   document.body.append(ueber); document.body.style.overflow = "hidden";
   window.addEventListener("resize", planen); window.addEventListener("keydown", taste);
   kopfFuellen(); zeichneVB();
