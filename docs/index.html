@@ -109,6 +109,25 @@ svg{width:100%;height:auto;display:block}
 .vb-flaeche{-webkit-touch-callout:none}
 .vb-fuss{color:var(--muted);font-size:12px;padding:6px 12px 8px;border-top:1px solid var(--line)}
 .hint{color:var(--muted);font-size:12px;margin:6px 0 0}
+.posbox{background:var(--chip);border-radius:12px;padding:10px 12px;margin:0 0 10px}
+.posbox.leer{background:none;padding:0}
+.posbox .knopf{background:var(--card);margin-right:6px}
+.posbox.leer .knopf{background:var(--chip)}
+.posbox .zeile{font-size:13px;padding:5px 0}
+.posbox .feld input{background:var(--card)}
+.poskopf{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:14px;margin-bottom:4px}
+.poskopf span{color:var(--muted);font-size:12px}
+.pstatus{font-weight:650;font-size:13px;margin:2px 0 4px}
+.posknoepfe{display:flex;flex-wrap:wrap}
+.knopf.gefahr{background:var(--short);border-color:var(--short);color:#fff}
+.pbarwrap{margin:30px 6px 4px}
+.pbar{position:relative;height:8px;border-radius:99px}
+.pbar i{position:absolute;top:50%;transform:translate(-50%,-50%)}
+.pbar .pk{width:2px;height:18px;background:var(--text)}
+.pbar .pp{width:14px;height:14px;border-radius:50%;background:var(--accent);border:2px solid var(--card)}
+.pbar .pl{position:absolute;bottom:13px;transform:translateX(-50%);font-size:11px;font-weight:650;white-space:nowrap}
+.pachse{position:relative;display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:6px;height:14px}
+.pwrap{padding:0 14px 12px}
 .empty{color:var(--muted);text-align:center;padding:36px 12px}
 footer{color:var(--muted);font-size:12px;padding:14px 4px 28px}
 </style>
@@ -144,9 +163,11 @@ const state = {
   zeitraum: speicher.lies("zeitraum", "auto"),       // "auto", "3m" oder "alles"
   merkliste: speicher.lies("merkliste", []),         // Liste von Kürzeln
   waehrung: speicher.lies("waehrung", "orig"),       // "orig" (Heimatwährung) oder "eur"
+  positionen: speicher.lies("positionen", {}),      // simulierte Positionen je Kürzel
   alle: new Map()
 };
 if (!Array.isArray(state.merkliste)) state.merkliste = [];
+if (!state.positionen || typeof state.positionen !== "object" || Array.isArray(state.positionen)) state.positionen = {};
 
 function el(tag, attrs, ...kinder) {
   const e = document.createElement(tag);
@@ -198,6 +219,210 @@ function stern(k) {
   return b;
 }
 
+/* ---------- Simulierte Positionen (nur auf diesem Gerät) ---------- */
+const istObjekt = o => !!o && typeof o === "object" && !Array.isArray(o);
+const position = k => { const p = state.positionen[k]; return istObjekt(p) && p.kauf > 0 ? p : null; };
+function positionSpeichern(k, p) {
+  if (p) state.positionen[k] = p; else delete state.positionen[k];
+  speicher.schreib("positionen", state.positionen);
+}
+const anzeigeWaehrung = e => (waehrungVon(e) === "USD" && !euroModus()) ? "USD" : "EUR";
+function umrechnen(v, von, nach) {                 // EUR <-> USD mit dem heutigen Kurs
+  if (v == null || von === nach) return v;
+  const r = state.daten && state.daten.eur_usd; if (!r) return v;
+  return von === "EUR" ? v * r : v / r;
+}
+// Eintrag mit Kursverlauf (Signal oder Setup) zu einem Kürzel, sonst der einfache Eintrag
+const mitKursen = (k, ersatz) => [...state.daten.signale, ...state.daten.setups].find(x => x.kuerzel === k && x.kurse) || ersatz;
+
+// alle Werte in der Anzeigewährung; Ergebnis, Abstände und ob Stop/Ziel seit dem Kauf berührt wurden
+function positionAuswerten(e, p) {
+  const nach = anzeigeWaehrung(e), u = v => v == null ? null : umrechnen(v, p.waehrung || waehrungVon(e), nach);
+  const K = u(p.kauf), S = u(p.stop), Z = u(p.ziel), P = e.kurs != null ? e.kurs * faktor(e) : null;
+  const long = Z != null ? Z > K : S != null ? S < K : true, vz = long ? 1 : -1, n = p.stueck || null;
+  const r = {K, S, Z, P, long, n, datum: p.datum || null};
+  if (P != null) {
+    r.ergProz = (P - K) / K * 100 * vz;
+    if (n) r.erg = (P - K) * n * vz;
+    if (S != null) r.bisStop = (S - P) / P * 100;
+    if (Z != null) r.bisZiel = (Z - P) / P * 100;
+  }
+  if (n && S != null) r.risiko = (S - K) * n * vz;
+  if (n && Z != null) r.chance = (Z - K) * n * vz;
+  if (S != null && Z != null) r.crv = Math.abs(Z - K) / Math.abs(K - S);
+  const Kd = e.kurse, f = faktor(e);
+  const beruehrt = (grenze, istStop) => {
+    if (grenze == null) return null;
+    const vonOben = long === istStop;                // Long-Stop und Short-Ziel liegen unter dem Kurs
+    if (Kd && Kd.d) {
+      const hoch = Kd.h || Kd.c, tief = Kd.l || Kd.c;
+      for (let i = 0; i < Kd.d.length; i++) {
+        if (r.datum && Kd.d[i] <= r.datum) continue; // erst ab dem Tag nach dem Kauf
+        if (vonOben ? tief[i] * f <= grenze : hoch[i] * f >= grenze) return Kd.d[i];
+      }
+      return null;
+    }
+    if (P == null) return null;
+    return (vonOben ? P <= grenze : P >= grenze) ? (e.stand || r.datum || "") : null;
+  };
+  r.stopTag = beruehrt(S, true); r.zielTag = beruehrt(Z, false);
+  return r;
+}
+const positionFuerChart = e => { const p = position(e.kuerzel); if (!p) return null;
+  const a = positionAuswerten(e, p); return {K: a.K, S: a.S, Z: a.Z, datum: a.datum}; };
+
+function positionsBadge(e) {
+  const p = position(e.kuerzel); if (!p) return null;
+  const a = positionAuswerten(mitKursen(e.kuerzel, e), p);
+  let text, gut;
+  const ersterTreffer = a.stopTag && (!a.zielTag || a.stopTag <= a.zielTag) ? "stop" : a.zielTag ? "ziel" : null;
+  if (ersterTreffer === "stop") { text = "Stop berührt"; gut = false; }
+  else if (ersterTreffer === "ziel") { text = "Ziel erreicht"; gut = true; }
+  else if (a.ergProz != null) { text = "Pos. " + prozent(a.ergProz); gut = a.ergProz >= 0; }
+  else { text = "Position"; gut = true; }
+  return el("span", {class: "badge " + (gut ? "long" : "short"), style: "margin:0 0 0 6px", text: text});
+}
+
+const eingabeZahl = v => v == null ? "" : v.toLocaleString("de-DE", {useGrouping: false, maximumFractionDigits: v < 5 ? 3 : 2});
+
+function positionsBlock(e) {
+  const k = e.kuerzel, box = el("div", {class: "posbox"});
+  let modus = "anzeige", loeschFrage = false;
+  const render = () => {
+    box.replaceChildren();
+    const p = position(k);
+    if (modus === "form") { box.append(...formular(p)); return; }
+    if (!p) {
+      const b = el("button", {class: "knopf", type: "button", text: "＋ Simulierte Position eintragen", style: "margin-top:0"});
+      b.addEventListener("click", () => { modus = "form"; render(); });
+      box.classList.add("leer"); box.append(b); return;
+    }
+    box.classList.remove("leer");
+    const a = positionAuswerten(e, p), z = zeichenVon(e), g = v => zahl.format(v) + " " + z;
+    box.append(el("div", {class: "poskopf"}, el("b", {text: "Simulierte Position · " + (a.long ? "Long" : "Short")}),
+      el("span", {text: a.datum ? "seit " + datumDE(a.datum) : ""})));
+    // Status
+    if (a.stopTag || a.zielTag) {
+      const stopZuerst = a.stopTag && (!a.zielTag || a.stopTag < a.zielTag), gleich = a.stopTag && a.stopTag === a.zielTag;
+      const t = gleich ? "Stop und Ziel am selben Tag berührt (" + datumDE(a.stopTag) + ") – Reihenfolge unklar."
+        : stopZuerst ? "Stop berührt am " + datumDE(a.stopTag) + " (Tagestief/-hoch)."
+        : "Ziel erreicht am " + datumDE(a.zielTag) + ".";
+      box.append(el("div", {class: "pstatus", style: "color:var(--" + (stopZuerst || gleich ? "short" : "long") + ")", text: t}));
+    }
+    const zeile = (l, w, farbe) => el("div", {class: "zeile"}, el("span", {text: l}),
+      el("b", {text: w, style: farbe ? "color:var(--" + farbe + ")" : ""}));
+    box.append(zeile("Kauf", g(a.K) + (a.n ? " · " + eingabeZahl(a.n) + " Stück" : "")));
+    if (a.P != null) box.append(zeile("Aktueller Kurs", g(a.P) + " · " + prozent(a.ergProz) + (a.erg != null ? " (" + (a.erg >= 0 ? "+" : "") + g(a.erg) + ")" : ""),
+      a.ergProz >= 0 ? "long" : "short"));
+    if (a.S != null) box.append(zeile("Stop " + g(a.S), a.P != null ? "noch " + g(Math.abs(a.S - a.P)) + " (" + prozent(a.bisStop) + ")" : "", "short"));
+    if (a.Z != null) box.append(zeile("Ziel " + g(a.Z), a.P != null ? "noch " + g(Math.abs(a.Z - a.P)) + " (" + prozent(a.bisZiel) + ")" : "", "long"));
+    if (a.risiko != null || a.chance != null || a.crv != null) {
+      const teile = [];
+      if (a.risiko != null) teile.push("Risiko " + g(a.risiko));
+      if (a.chance != null) teile.push("Chance +" + g(a.chance));
+      if (a.crv != null) teile.push("CRV 1 : " + zahl.format(a.crv));
+      box.append(el("div", {class: "meta", style: "padding:5px 0 0", text: teile.join(" · ")}));
+    }
+    if (a.S != null && a.Z != null && a.P != null) box.append(balken(a, g));
+    const knoepfe = el("div", {class: "posknoepfe"});
+    const kn = (t, fn, extra) => { const b = el("button", {class: "knopf" + (extra || ""), type: "button", text: t}); b.addEventListener("click", fn); knoepfe.append(b); };
+    if (!loeschFrage) {
+      kn("Bearbeiten", () => { modus = "form"; render(); });
+      kn("Position löschen", () => { loeschFrage = true; render(); });
+    } else {
+      kn("Ja, löschen", () => { positionSpeichern(k, null); zeichne(); }, " gefahr");
+      kn("Abbrechen", () => { loeschFrage = false; render(); });
+    }
+    box.append(knoepfe);
+    const umger = (p.waehrung || waehrungVon(e)) !== anzeigeWaehrung(e);
+    box.append(el("p", {class: "hint", text: "Nur zur Beobachtung, ohne Gebühren und Spread. Gespeichert nur auf diesem Gerät, bis du sie löschst." +
+      (umger ? " Eingegeben in " + (p.waehrung === "EUR" ? "€" : "$") + ", hier mit dem heutigen Wechselkurs umgerechnet." : "")}));
+  };
+
+  function formular(p) {
+    const usd = waehrungVon(e) === "USD", rate = state.daten.eur_usd;
+    let wae = p ? (p.waehrung || waehrungVon(e)) : (usd && rate ? "EUR" : waehrungVon(e));
+    const vor = v => v == null ? null : umrechnen(v, waehrungVon(e), wae);
+    const f = {};
+    const feld = (id, label, wert, typ) => {
+      const inp = el("input", typ ? {type: typ, id: "pos-" + id + "-" + k}
+        : {type: "text", inputmode: "decimal", autocomplete: "off", id: "pos-" + id + "-" + k});
+      inp.value = typ === "date" ? (wert || "") : eingabeZahl(wert);
+      f[id] = inp;
+      return el("label", {class: "feld"}, el("span", {text: label}), inp);
+    };
+    const zeichenW = () => wae === "EUR" ? "€" : "$";
+    const titel = el("div", {class: "poskopf"}, el("b", {text: p ? "Position bearbeiten" : "Simulierte Position"}));
+    const teile = [titel];
+    const labels = [];
+    if (usd && rate) {
+      const reihe = el("div", {class: "ctrl", style: "margin:2px 0 8px"}, el("span", {class: "meta", text: "Eingabe in"}));
+      const chips = [["€ (wie Trade Republic)", "EUR"], ["$ (Yahoo)", "USD"]].map(([t, w]) => {
+        const b = el("button", {class: "chip", type: "button", text: t, "aria-pressed": String(wae === w)});
+        b.addEventListener("click", () => {
+          if (w === wae) return;
+          ["kauf", "stop", "ziel"].forEach(id => { const v = parseZahl(f[id].value); if (v != null && !Number.isNaN(v)) f[id].value = eingabeZahl(umrechnen(v, wae, w)); });
+          wae = w; chips.forEach(c => c.setAttribute("aria-pressed", String(c.dataset.w === wae)));
+          labels.forEach(([sp, t]) => sp.textContent = t + " (" + zeichenW() + ")");
+        });
+        b.dataset.w = w; return b;
+      });
+      reihe.append(...chips); teile.push(reihe);
+    }
+    const kaufStd = p ? p.kauf : vor(e.kurs), stopStd = p ? p.stop : vor(e.punkt3 != null ? e.punkt3 : null);
+    const gitter = el("div", {class: "grid2"},
+      feld("kauf", "Kaufkurs", kaufStd), feld("stop", "Stop", stopStd),
+      feld("ziel", "Kursziel", p ? p.ziel : null), feld("stueck", "Stückzahl (optional)", p ? p.stueck : null),
+      feld("datum", "Kaufdatum", p ? p.datum : (state.daten.letzter_handelstag || e.stand), "date"));
+    [["kauf", "Kaufkurs"], ["stop", "Stop"], ["ziel", "Kursziel"]].forEach(([id, t]) => {
+      const sp = f[id].previousSibling; labels.push([sp, t]); sp.textContent = t + " (" + zeichenW() + ")";
+    });
+    teile.push(gitter);
+    const fehl = el("div", {class: "fehl", style: "margin-top:8px"});
+    const speichernKnopf = el("button", {class: "knopf", type: "button", text: "Speichern"});
+    const abbrechen = el("button", {class: "knopf", type: "button", text: "Abbrechen"});
+    abbrechen.addEventListener("click", () => { modus = "anzeige"; render(); });
+    speichernKnopf.addEventListener("click", () => {
+      const w = {}, namen = {kauf: "Kaufkurs", stop: "Stop", ziel: "Kursziel", stueck: "Stückzahl"};
+      for (const id of Object.keys(namen)) {
+        const v = parseZahl(f[id].value);
+        if (v !== null && (Number.isNaN(v) || v <= 0)) { fehl.textContent = namen[id] + ": bitte eine positive Zahl eingeben (z. B. 12,50)."; return; }
+        w[id] = v;
+      }
+      if (!w.kauf) { fehl.textContent = "Bitte einen Kaufkurs eingeben."; return; }
+      if (w.stop != null && w.stop === w.kauf) { fehl.textContent = "Stop darf nicht gleich dem Kaufkurs sein."; return; }
+      if (w.ziel != null && w.ziel === w.kauf) { fehl.textContent = "Kursziel darf nicht gleich dem Kaufkurs sein."; return; }
+      if (w.stop != null && w.ziel != null && (w.stop < w.kauf) === (w.ziel < w.kauf)) {
+        fehl.textContent = "Stop und Kursziel müssen auf verschiedenen Seiten des Kaufkurses liegen (Long: Stop darunter, Ziel darüber)."; return;
+      }
+      const datum = /^\d{4}-\d{2}-\d{2}$/.test(f.datum.value) ? f.datum.value : null;
+      positionSpeichern(k, {kauf: w.kauf, stop: w.stop, ziel: w.ziel, stueck: w.stueck, waehrung: wae, datum});
+      if (!istMerk(k)) merkeUm(k);
+      modus = "anzeige"; loeschFrage = false; zeichne();
+    });
+    teile.push(fehl, el("div", {class: "posknoepfe"}, speichernKnopf, abbrechen),
+      el("p", {class: "hint", text: "Long: Stop unter, Ziel über dem Kaufkurs. Short: umgekehrt. Vorschlag für den Stop ist Punkt 3."}));
+    return teile;
+  }
+  render();
+  return box;
+}
+
+// Balken: Stop links, Ziel rechts, Strich = Kauf, Punkt = aktueller Kurs
+function balken(a, g) {
+  const t = v => Math.max(0, Math.min(1, (v - a.S) / (a.Z - a.S)));
+  const tk = t(a.K) * 100, tp = t(a.P) * 100;
+  const spur = el("div", {class: "pbar", role: "img",
+    "aria-label": "Kurs " + g(a.P) + " zwischen Stop " + g(a.S) + " und Ziel " + g(a.Z)});
+  spur.style.background = "linear-gradient(to right, color-mix(in srgb,var(--short) 45%,transparent) 0 " + tk + "%, color-mix(in srgb,var(--long) 45%,transparent) " + tk + "% 100%)";
+  spur.append(el("i", {class: "pk", style: "left:" + tk + "%"}), el("i", {class: "pp", style: "left:" + tp + "%"}),
+    el("span", {class: "pl", style: "left:" + Math.max(10, Math.min(90, tp)) + "%", text: "Kurs " + zahl.format(a.P)}));
+  const achse = el("div", {class: "pachse"}, el("span", {text: "Stop"}),
+    el("span", {style: "left:" + Math.max(14, Math.min(86, tk)) + "%;position:absolute;transform:translateX(-50%)", text: "Kauf"}),
+    el("span", {text: "Ziel"}));
+  return el("div", {class: "pbarwrap"}, spur, achse);
+}
+
 /* ---------- Chart (Kerzen oder Linie, Volumen, Auswahl, Vollbild) ---------- */
 function fensterGroesse(e, gesamt) {
   if (state.zeitraum === "alles") return gesamt;
@@ -222,7 +447,7 @@ function reihen(e) {
 }
 
 let clipZaehler = 0;
-// zeichnet den Chart für einen Ausschnitt; opt: W, H, start, anzahl, kerzen, volumen, volAnteil, wahl, pr, preis {lo,hi}, achse
+// zeichnet den Chart für einen Ausschnitt; opt: W, H, start, anzahl, kerzen, volumen, volAnteil, wahl, pr, preis {lo,hi}, achse, position {K,S,Z,datum}
 function chartBauen(e, R, opt) {
   const W = opt.W, H = opt.H, pl = 8, pr = opt.pr || 58, pt = 14, pb = 24;
   const gesamt = R.c.length;
@@ -239,7 +464,8 @@ function chartBauen(e, R, opt) {
   const long = e.richtung === "long";
   const farbe = long ? "var(--long)" : "var(--short)";
   const p2 = R.p2, p3 = R.p3;
-  const alle = h.concat(l, [p2, p3]);
+  const pos = opt.position || null;
+  const alle = h.concat(l, [p2, p3], pos ? [pos.K, pos.S, pos.Z].filter(v => v != null) : []);
   let lo = Math.min(...alle), hi = Math.max(...alle);
   const pad = (hi - lo) * 0.14 || 1; lo -= pad; hi += pad;
   const auto = {lo, hi};
@@ -274,11 +500,26 @@ function chartBauen(e, R, opt) {
     P.append(sv("line", {x1: pl, x2: W - pr, y1: y(wert), y2: y(wert), stroke: col, "stroke-width": 1,
       "stroke-dasharray": "4 3", opacity: 0.8}));
   });
+  // simulierte Position: Zonen (rot bis Stop, grün bis Ziel) und Linien ab dem Kaufdatum
+  if (pos) {
+    let i0 = pos.datum ? d.findIndex(t => t >= pos.datum) : 0;
+    const xs = i0 === -1 ? x(n - 1) : i0 <= 0 && (!pos.datum || pos.datum <= d[0]) ? pl : x(i0), xe = W - pr;
+    const zone = (a, b, col) => P.append(sv("rect", {x: xs, y: Math.min(y(a), y(b)), width: Math.max(1, xe - xs),
+      height: Math.abs(y(a) - y(b)), fill: col, "fill-opacity": 0.12, class: "poszone"}));
+    if (pos.Z != null) zone(pos.K, pos.Z, "var(--long)");
+    if (pos.S != null) zone(pos.K, pos.S, "var(--short)");
+    [[pos.Z, "var(--long)"], [pos.S, "var(--short)"], [pos.K, "var(--accent)"]].forEach(([v, col]) => {
+      if (v != null) P.append(sv("line", {x1: xs, x2: xe, y1: y(v), y2: y(v), stroke: col, "stroke-width": 1.4, class: "poslinie"}));
+    });
+    if (i0 >= 0 && pos.datum && pos.datum >= d[0]) P.append(sv("circle", {cx: xs, cy: y(pos.K), r: 3.5, fill: "var(--accent)", stroke: "var(--card)", "stroke-width": 1}));
+  }
   // Beschriftungen rechts, ohne dass sie sich überlappen
   const beschr = [
     {y: y(p2) + 4, text: "2: " + zahl.format(p2), col: farbe, fett: 600},
     {y: y(p3) + 4, text: "3: " + zahl.format(p3), col: "var(--muted)", fett: 600},
     {y: y(c[n - 1]) + 4, text: zahl.format(c[n - 1]), col: "var(--accent)", fett: 400},
+    ...(pos ? [[pos.K, "K", "var(--accent)"], [pos.S, "S", "var(--short)"], [pos.Z, "Z", "var(--long)"]]
+      .filter(([v]) => v != null).map(([v, t, col]) => ({y: y(v) + 4, text: t + " " + zahl.format(v), col, fett: 700})) : []),
   ].filter(b => b.y - 4 >= pt - 2 && b.y - 4 <= preisUnten + 2).sort((a, b) => a.y - b.y);
   for (let k = 1; k < beschr.length; k++) if (beschr[k].y - beschr[k - 1].y < 13) beschr[k].y = beschr[k - 1].y + 13;
   const maxY = preisUnten - 2;
@@ -431,7 +672,7 @@ function vollbild(e) {
     klemmen();
     const W = Math.max(260, flaeche.clientWidth), H = Math.max(180, flaeche.clientHeight);
     bau = chartBauen(e, R, {W, H, start, anzahl, kerzen: state.ansicht === "kerzen", volumen: true, volAnteil: 0.2,
-      wahl, pr: W > 600 ? 64 : 58, preis: manuell, achse: true});
+      wahl, pr: W > 600 ? 64 : 58, preis: manuell, achse: true, position: positionFuerChart(e)});
     fkSvg.setAttribute("viewBox", "0 0 " + W + " " + H);
     flaeche.replaceChildren(bau.svg, fkSvg);
     if (wahl != null) {
@@ -595,7 +836,7 @@ function karte(e, art) {
     el("div", {class: "name", text: e.name}),
     rechts,
     el("div", {class: "meta"}, el("span", {class: "badge " + e.richtung, text: long ? "Long" : "Short"}),
-      document.createTextNode(e.kuerzel + " · " + e.index + (e.volumen_klasse ? " · Vol. " + e.volumen_klasse : "")), badgeAlt(e)),
+      document.createTextNode(e.kuerzel + " · " + e.index + (e.volumen_klasse ? " · Vol. " + e.volumen_klasse : "")), badgeAlt(e), positionsBadge(e)),
     el("div", {class: "right", text: ""}));
   kopf.append(el("div", {class: "meta", text: unten, style: "grid-column:1 / -1"}));
   const k = el("div", {class: "card" + (offen ? " open" : "")}, el("div", {class: "top"}, kopf, stern(e.kuerzel)));
@@ -628,7 +869,7 @@ function karte(e, art) {
       box.replaceChildren();
       const R = reihen(e), m = fensterGroesse(e, R.c.length);
       const bau = chartBauen(e, R, {W: 360, H: 270, start: R.c.length - m, anzahl: m, kerzen: state.ansicht === "kerzen",
-        volumen: true, volAnteil: 0.15, wahl});
+        volumen: true, volAnteil: 0.15, wahl, position: positionFuerChart(e)});
       bau.svg.addEventListener("click", ev => { wahl = bau.indexAus(ev.clientX); zeigeChart(); });
       box.append(bau.svg);
       if (wahl != null) {
@@ -637,7 +878,7 @@ function karte(e, art) {
       }
     };
     zeigeChart();
-    detail.append(fakten, volumenZeile(e), ctrl, box,
+    detail.append(fakten, volumenZeile(e), positionsBlock(e), ctrl, box,
       el("p", {class: "hint", text: (kerzenModus ? "Tageskerzen (grün = Schluss über Eröffnung), darunter das Volumen. Tippe auf eine Kerze für Details. " : "Schlusskurse. ") +
         "Zahlen = 1-2-3-Punkte, bestimmt nach Schlusskurs" + (art === "signale" ? ". Stern = Ausbruch." : ".") +
         " Preise in " + zeichenVon(e) + (faktor(e) !== 1 ? ", alle Tage mit dem heutigen Wechselkurs umgerechnet." : ".")}));
@@ -663,6 +904,7 @@ function einfacheKarte(a) {
   treffer.forEach(t => meta.append(el("span", {class: "badge " + t.r, text: t.t + (t.r === "long" ? " Long" : " Short")})));
   meta.append(document.createTextNode(a.kuerzel + (a.index ? " · " + a.index : "") + (a.volumen_klasse ? " · Vol. " + a.volumen_klasse : "")));
   const b = badgeAlt(a); if (b) meta.append(b);
+  const pb = positionsBadge(a); if (pb) meta.append(pb);
   const rechts = a.kurs != null
     ? el("div", {class: "right"}, geld(a, a.kurs), el("br"),
         el("span", {class: a.veraenderung >= 0 ? "pos" : "neg", text: prozent(a.veraenderung)}))
@@ -670,7 +912,9 @@ function einfacheKarte(a) {
   const info = el("div", {class: "plain"}, el("div", {class: "name", text: a.name}), rechts, meta);
   if (!treffer.length && a.kurs != null)
     info.append(el("div", {class: "meta", text: "Aktuell kein 1-2-3-Signal oder Setup", style: "grid-column:1 / -1"}));
-  return el("div", {class: "card"}, el("div", {class: "top"}, info, stern(a.kuerzel)));
+  const karteE = el("div", {class: "card"}, el("div", {class: "top"}, info, stern(a.kuerzel)));
+  if (a.kurs != null) karteE.append(el("div", {class: "pwrap"}, positionsBlock(mitKursen(a.kuerzel, a))));
+  return karteE;
 }
 
 
@@ -982,7 +1226,7 @@ async function start() {
   document.getElementById("fuss").textContent = "Berechnet " + erstellt.toLocaleString("de-DE", {dateStyle: "short", timeStyle: "short"}) +
     " aus Kursen der Heimatbörse laut Yahoo Finance (Fenster N=" + d.einstellungen.N + "). " +
     "Kurse bei Trade Republic können um Bruchteile eines Prozents abweichen, weil dort bis spät abends gehandelt wird. " +
-    "Die Watchlist wird nur auf diesem Gerät gespeichert. Keine Anlageberatung.";
+    "Watchlist und simulierte Positionen werden nur auf diesem Gerät gespeichert. Keine Anlageberatung.";
   anzeigeLeiste();
   filterLeiste();
   zeichne();
