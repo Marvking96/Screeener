@@ -479,7 +479,9 @@ function reihen(e) {
 }
 
 let clipZaehler = 0;
-// zeichnet den Chart für einen Ausschnitt; opt: W, H, start, anzahl, kerzen, volumen, volAnteil, wahl, pr, preis {lo,hi}, achse, position {K,S,Z,datum}
+// freie Fläche rechts neben der letzten Kerze (in Kerzenbreiten)
+const leerStd = m => Math.max(2, Math.round(m * 0.05));
+// zeichnet den Chart für einen Ausschnitt; opt: W, H, start, anzahl, leer, kerzen, volumen, volAnteil, wahl, pr, preis {lo,hi}, achse, position {K,S,Z,datum}
 function chartBauen(e, R, opt) {
   const W = opt.W, H = opt.H, pl = 8, pr = opt.pr || 58, pt = 14, pb = 24;
   const gesamt = R.c.length;
@@ -503,7 +505,8 @@ function chartBauen(e, R, opt) {
   const auto = {lo, hi};
   if (opt.preis) { lo = opt.preis.lo; hi = opt.preis.hi; }
   const dez = (hi - lo) < 0.6 ? 3 : 2, fmt = v => v.toLocaleString("de-DE", {minimumFractionDigits: dez, maximumFractionDigits: dez});
-  const pitch = (W - pl - pr) / n;
+  const leer = Math.max(0, opt.leer || 0);
+  const pitch = (W - pl - pr) / (n + leer);
   const x = i => pl + pitch * (i + 0.5);
   const y = v => pt + (preisUnten - pt) * (1 - (v - lo) / (hi - lo));
   const bw = Math.max(1.2, Math.min(10, pitch * 0.68));
@@ -607,8 +610,12 @@ function chartBauen(e, R, opt) {
       fill: "var(--accent)", "font-size": 16}, "★"));
   }
   // Datumsachse
-  [0, Math.floor((n - 1) / 2), n - 1].forEach((i, k) => {
-    s.append(sv("text", {x: x(i), y: H - 6, "text-anchor": k === 0 ? "start" : k === 2 ? "end" : "middle",
+  // Anfang, Mitte, Ende; Beschriftungen, die zu eng beieinander lägen, fallen weg (z. B. bei viel Leere rechts)
+  const abst = x(n - 1) - x(0);
+  [[0, "start"], [Math.floor((n - 1) / 2), "middle"], [n - 1, "end"]].forEach(([i, anker], k) => {
+    if (k === 1 && abst < 110) return;
+    if (k === 0 && abst < 45) return;
+    s.append(sv("text", {x: k === 2 && abst < 45 ? x(i) + 4 : x(i), y: H - 6, "text-anchor": k === 2 && abst < 45 ? "middle" : anker,
       fill: "var(--muted)", "font-size": 10}, kurzDatum(d[i])));
   });
   return {svg: s, s0, m, pitch, W, H, pr, pl, pt, preisUnten, kerzen, n, bereich: {lo, hi}, auto, fmt,
@@ -657,8 +664,10 @@ const VOLUMEN_TAGE_ANZEIGE = 20;
 
 // Vollbild: Chart über den ganzen Bildschirm. Zoom waagrecht und senkrecht, Verschieben, Fadenkreuz mit Kurs und Datum
 function vollbild(e) {
-  const R = reihen(e), gesamt = R.c.length, MIN = Math.min(10, gesamt);
-  let anzahl = fensterGroesse(e, gesamt), start = gesamt - anzahl, wahl = null, bau = null, raf = 0;
+  // anzahl = sichtbare Plätze (Kerzen plus freie Fläche rechts); start darf so weit nach rechts, dass rechts Leere entsteht
+  const R = reihen(e), gesamt = R.c.length, MIN = Math.min(10, gesamt), MAXS = Math.ceil(gesamt * 1.25), SICHTBAR = Math.min(8, gesamt);
+  const fg = fensterGroesse(e, gesamt);
+  let anzahl = fg + leerStd(fg), start = gesamt - fg, wahl = null, bau = null, raf = 0;
   let manuell = null, fk = null, fkModus = false, zuletztManuell = false;
   const ueber = el("div", {class: "vollbild", role: "dialog", "aria-label": "Chart " + e.name});
   const flaeche = el("div", {class: "vb-flaeche"});
@@ -683,14 +692,14 @@ function vollbild(e) {
       chip("−", "Waagrecht herauszoomen", () => zoomEnde(1 / 0.7)), chip("+", "Waagrecht hineinzoomen", () => zoomEnde(0.7)),
       chip("↕−", "Senkrecht herauszoomen", () => zoomY(1 / 0.7, null)), chip("↕+", "Senkrecht hineinzoomen", () => zoomY(0.7, null)));
     if (manuell) kopf.append(chip("Auto ↕", "Preisachse wieder automatisch", () => { manuell = null; zeichneVB(); }));
-    kopf.append(chip("Alles", "Alles anzeigen", () => { anzahl = gesamt; start = 0; manuell = null; fk = null; zeichneVB(); }),
+    kopf.append(chip("Alles", "Alles anzeigen", () => { anzahl = gesamt + leerStd(gesamt); start = 0; manuell = null; fk = null; zeichneVB(); }),
       chip("✕ Schließen", "Vollbild schließen", schliessen));
     kopf.lastChild.classList.add("rechts-aus");
     zuletztManuell = !!manuell;
   };
   const zoomEnde = f => {                       // waagrecht: um den gewählten Tag, sonst um das rechte Ende
-    const anker = wahl != null ? wahl : start + anzahl - 1, anteil = (anker - start) / anzahl;
-    anzahl = Math.max(MIN, Math.min(gesamt, anzahl * f)); start = anker - anteil * anzahl; fk = null; zeichneVB();
+    const anker = wahl != null ? wahl : Math.min(gesamt - 1, start + anzahl - 1), anteil = (anker - start) / anzahl;
+    anzahl = Math.max(MIN, Math.min(MAXS, anzahl * f)); start = anker - anteil * anzahl; fk = null; zeichneVB();
   };
   const spanKlemmen = sp => { const A = bau.auto.hi - bau.auto.lo; return Math.max(A * 0.02, Math.min(A * 20, sp)); };
   const zoomY = (f, yRel) => {                  // senkrecht: um die Kurshöhe unter dem Finger (sonst Mitte)
@@ -700,12 +709,17 @@ function vollbild(e) {
     const ankerPreis = b0.hi - t * span, ns = spanKlemmen(span * f), hi = ankerPreis + t * ns;
     manuell = {lo: hi - ns, hi}; fk = null; planen();
   };
-  const klemmen = () => { anzahl = Math.max(MIN, Math.min(gesamt, anzahl)); start = Math.max(0, Math.min(gesamt - anzahl, start)); };
+  const klemmen = () => {
+    anzahl = Math.max(MIN, Math.min(MAXS, anzahl));
+    start = Math.max(0, Math.min(gesamt - Math.max(SICHTBAR, anzahl * 0.2), start));   // rechts höchstens 80 % leer
+  };
 
   function zeichneVB() {
     klemmen();
     const W = Math.max(260, flaeche.clientWidth), H = Math.max(180, flaeche.clientHeight);
-    bau = chartBauen(e, R, {W, H, start, anzahl, kerzen: state.ansicht === "kerzen", volumen: true, volAnteil: 0.2,
+    const s0 = Math.max(0, Math.round(start)), ende = Math.min(gesamt, Math.round(start + anzahl));
+    const m = Math.max(SICHTBAR, ende - s0), leer = Math.max(0, start + anzahl - gesamt);
+    bau = chartBauen(e, R, {W, H, start: s0, anzahl: m, leer, kerzen: state.ansicht === "kerzen", volumen: true, volAnteil: 0.2,
       wahl, pr: W > 600 ? 64 : 58, preis: manuell, achse: true, position: positionFuerChart(e)});
     fkSvg.setAttribute("viewBox", "0 0 " + W + " " + H);
     flaeche.replaceChildren(bau.svg, fkSvg);
@@ -793,8 +807,8 @@ function vollbild(e) {
       const [a, b] = [...zeiger.values()], r = flaeche.getBoundingClientRect();
       const nx = Math.abs(a.x - b.x), ny = Math.abs(a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
       const breite = Math.max(1, r.width - bau.pl - bau.pr), anteilJetzt = (mx - r.left - bau.pl) / breite;
-      if (pinch.ax >= 40) anzahl = Math.max(MIN, Math.min(gesamt, pinch.anzahl * pinch.ax / Math.max(10, nx)));
-      else if (pinch.ay < 40) anzahl = Math.max(MIN, Math.min(gesamt, pinch.anzahl * pinch.abstand / Math.max(10, Math.hypot(a.x - b.x, a.y - b.y))));
+      if (pinch.ax >= 40) anzahl = Math.max(MIN, Math.min(MAXS, pinch.anzahl * pinch.ax / Math.max(10, nx)));
+      else if (pinch.ay < 40) anzahl = Math.max(MIN, Math.min(MAXS, pinch.anzahl * pinch.abstand / Math.max(10, Math.hypot(a.x - b.x, a.y - b.y))));
       start = pinch.ankerIdx - Math.max(0, Math.min(1, anteilJetzt)) * anzahl;
       if (pinch.ay >= 40) {
         const span0 = pinch.b0.hi - pinch.b0.lo, ns = spanKlemmen(span0 * pinch.ay / Math.max(10, ny));
@@ -829,7 +843,7 @@ function vollbild(e) {
     if (ev.shiftKey || p.x > bau.W - bau.pr) { zoomY(Math.exp(d * 0.002), p.y); return; }
     const anteil = Math.max(0, Math.min(1, (ev.clientX - r.left - bau.pl) / Math.max(1, r.width - bau.pl - bau.pr)));
     const ankerIdx = start + anteil * anzahl;
-    anzahl = Math.max(MIN, Math.min(gesamt, anzahl * Math.exp(d * 0.002))); start = ankerIdx - anteil * anzahl; fk = null; planen();
+    anzahl = Math.max(MIN, Math.min(MAXS, anzahl * Math.exp(d * 0.002))); start = ankerIdx - anteil * anzahl; fk = null; planen();
   }, {passive: false});
 
   ueber.append(kopf, flaeche,
@@ -902,7 +916,7 @@ function karte(e, art) {
     const zeigeChart = () => {
       box.replaceChildren();
       const R = reihen(e), m = fensterGroesse(e, R.c.length);
-      const bau = chartBauen(e, R, {W: 360, H: 270, start: R.c.length - m, anzahl: m, kerzen: state.ansicht === "kerzen",
+      const bau = chartBauen(e, R, {W: 360, H: 270, start: R.c.length - m, anzahl: m, leer: leerStd(m), kerzen: state.ansicht === "kerzen",
         volumen: true, volAnteil: 0.15, wahl, position: positionFuerChart(e)});
       bau.svg.addEventListener("click", ev => { wahl = bau.indexAus(ev.clientX); zeigeChart(); });
       box.append(bau.svg);
