@@ -2,8 +2,13 @@ name: Screener
 
 on:
   schedule:
-    - cron: "15 22 * * 1-5"
-  workflow_dispatch:
+    - cron: "15 22 * * 1-5"   # Mo-Fr um 22:15 UTC, nach Börsenschluss in den USA
+    - cron: "15 5 * * 2-6"    # Di-Sa um 05:15 UTC (früh morgens): holt die DAX-Kurse des Vortags nach
+  workflow_dispatch:           # erlaubt den Start per Knopfdruck
+
+concurrency:                   # nie zwei Läufe gleichzeitig
+  group: screener
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -35,4 +40,5 @@ jobs:
           git config user.email "screener-bot@users.noreply.github.com"
           git add docs/ergebnis.json aktien.csv
           git diff --cached --quiet || git commit -m "Tägliches Update"
+          git pull --rebase || true
           git push
