@@ -236,23 +236,52 @@ def baue_eintrag(ticker, name, index_name, df, t):
 FELDER = ("Open", "High", "Low", "Close", "Volume")
 
 
+ROHFELDER = FELDER + ("Adj Close",)
+
+
 def lade_block(tickers):
-    """Lädt Open/High/Low/Close für einen Block von Aktien. Gibt je Feld eine Tabelle zurück (eine Spalte je Aktie)."""
-    daten = yf.download(tickers, period=ZEITRAUM, auto_adjust=True, progress=False, threads=True)
+    """Lädt Open/High/Low/Close/Volumen für einen Block von Aktien. Gibt je Feld eine Tabelle zurück (eine Spalte je Aktie).
+    Die Kurse kommen unbereinigt; die Bereinigung um Dividenden/Splits macht baue_serie selbst. Grund: Yahoo liefert bei
+    europäischen Aktien für den letzten Tag oft noch keinen bereinigten Kurs ("Adj Close"). Mit auto_adjust=True wird
+    der Schlusskurs dieses Tages dann leer und der Tag fällt weg."""
+    daten = yf.download(tickers, period=ZEITRAUM, auto_adjust=False, progress=False, threads=True)
     tabellen = {}
-    for feld in FELDER:
-        tabelle = daten[feld] if feld in daten else daten["Close"] * 0     # fehlt das Volumen, wird 0 eingesetzt
+    for feld in ROHFELDER:
+        if feld in daten:
+            tabelle = daten[feld]
+        elif feld == "Adj Close":
+            tabelle = daten["Close"]                  # ohne bereinigte Kurse: unbereinigt verwenden
+        else:
+            tabelle = daten["Close"] * 0              # fehlt das Volumen, wird 0 eingesetzt
         if isinstance(tabelle, pd.Series):
             tabelle = tabelle.to_frame(tickers[0])
         tabellen[feld] = tabelle
     return tabellen
 
 
+def bereinige(df):
+    """Bereinigt eine Kerzen-Tabelle (Spalten Open/High/Low/Close/Adj Close/Volume) um Dividenden und Splits wie
+    auto_adjust: alle Kurse mal (Adj Close / Close). Fehlt der Faktor an einem Tag (typisch: der letzte Tag),
+    gilt der vom Vortag. Datum ohne Uhrzeit und Zeitzone."""
+    df = df[df["Close"].notna()].copy()
+    if "Adj Close" in df:
+        faktor = (df["Adj Close"] / df["Close"]).where(lambda f: (f > 0) & (f < 10))
+        faktor = faktor.ffill().bfill().fillna(1.0)
+        for feld in ("Open", "High", "Low", "Close"):
+            df[feld] = df[feld] * faktor
+        df = df.drop(columns=["Adj Close"])
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    df.index = idx.normalize()
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    return df
+
+
 def baue_serie(tabellen, ticker):
     """Macht aus den Tabellen eine Kerzen-Tabelle für eine Aktie. Tage ohne Schlusskurs fallen weg.
     Fehlt bei einem Tag Open/High/Low, wird der Schlusskurs eingesetzt."""
-    df = pd.DataFrame({feld: tabellen[feld][ticker] for feld in FELDER})
-    df = df[df["Close"].notna()].copy()
+    df = bereinige(pd.DataFrame({feld: tabellen[feld][ticker] for feld in ROHFELDER}))
     for feld in ("Open", "High", "Low"):
         df[feld] = df[feld].fillna(df["Close"])
     df["Volume"] = df["Volume"].fillna(0)
@@ -323,16 +352,38 @@ def hole_nach(serien, ref):
     if len(veraltet) > MAX_NACHLADEN:
         print("  Zu viele für einen Einzelabruf (vermutlich Feiertag an einer Börse). Sie werden markiert.")
         return veraltet
-    for t in veraltet:
-        for versuch in range(2):
-            try:
-                neu = baue_serie(lade_block([t]), t)
-                if len(neu) >= 40 and neu.index[-1] > serien[t].index[-1]:
-                    serien[t] = neu
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
+    for i, t in enumerate(veraltet):
+        zeigen = i < 3                                   # für die ersten drei steht im Protokoll, was geliefert wurde
+        try:
+            neu = baue_serie(lade_block([t]), t)
+            if zeigen:
+                print(f"    {t}: Einzelabruf liefert bis {neu.index[-1]:%d.%m.%Y}")
+            if len(neu) >= 40 and neu.index[-1] > serien[t].index[-1]:
+                serien[t] = neu
+                continue
+        except Exception as fehler:
+            if zeigen:
+                print(f"    {t}: Einzelabruf fehlgeschlagen ({fehler})")
+        time.sleep(0.5)
+        # zweiter Weg: Ticker.history mit festem Zeitraum; nur die fehlenden neuen Tage werden angehängt
+        try:
+            roh = yf.Ticker(t).history(start=(ref - pd.Timedelta(days=30)).strftime("%Y-%m-%d"),
+                                        end=(ref + pd.Timedelta(days=3)).strftime("%Y-%m-%d"), auto_adjust=False)
+            roh = roh.reindex(columns=list(ROHFELDER))
+            if roh["Adj Close"].isna().all():
+                roh["Adj Close"] = roh["Close"]
+            roh["Volume"] = roh["Volume"].fillna(0)
+            kurz = bereinige(roh)
+            for feld in ("Open", "High", "Low"):
+                kurz[feld] = kurz[feld].fillna(kurz["Close"])
+            if zeigen:
+                print(f"    {t}: history liefert bis {kurz.index[-1]:%d.%m.%Y}" if len(kurz) else f"    {t}: history leer")
+            neue_tage = kurz[kurz.index > serien[t].index[-1]]
+            if len(neue_tage):
+                serien[t] = pd.concat([serien[t], neue_tage[serien[t].columns]])
+        except Exception as fehler:
+            if zeigen:
+                print(f"    {t}: history fehlgeschlagen ({fehler})")
         time.sleep(0.3)
     rest = [t for t, s in serien.items() if s.index[-1] < ref]
     print(f"  Nachgeladen: {len(veraltet) - len(rest)}, weiterhin mit älterem Datenstand: {len(rest)}")
@@ -345,7 +396,7 @@ def main():
     tickers = list(liste["Kürzel"])
     namen = dict(zip(liste["Kürzel"], liste["Name"]))
     indizes = dict(zip(liste["Kürzel"], liste["Index"]))
-    print(f"{len(tickers)} Aktien in {LISTE}. Lade Kurse in Blöcken zu {BLOCK} ...")
+    print(f"{len(tickers)} Aktien in {LISTE}. Lade Kurse in Blöcken zu {BLOCK} ... (yfinance {getattr(yf, '__version__', '?')})")
 
     serien, ohne_daten = lade_serien(tickers)
     ref = referenzdatum(serien)
