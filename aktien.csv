@@ -378,14 +378,13 @@ PEG;Public Service Enterprise Group;S&P 500
 PTC;PTC Inc.;S&P 500
 PSA;Public Storage;S&P 500
 PHM;PulteGroup;S&P 500
-PWR;Quanta Services;S&P 500
-QCOM;Qualcomm;S&P 500
-DGX;Quest Diagnostics;S&P 500
 Q;Qnity Electronics;S&P 500
+QCOM;Qualcomm;S&P 500
+PWR;Quanta Services;S&P 500
+DGX;Quest Diagnostics;S&P 500
 RL;Ralph Lauren Corporation;S&P 500
 RJF;Raymond James Financial;S&P 500
 RDDT;Reddit;S&P 500
-RTX;RTX Corporation;S&P 500
 O;Realty Income;S&P 500
 REG;Regency Centers;S&P 500
 REGN;Regeneron Pharmaceuticals;S&P 500
@@ -399,6 +398,7 @@ ROL;Rollins, Inc.;S&P 500
 ROP;Roper Technologies;S&P 500
 ROST;Ross Stores;S&P 500
 RCL;Royal Caribbean Group;S&P 500
+RTX;RTX Corporation;S&P 500
 SPGI;S&P Global;S&P 500
 CRM;Salesforce;S&P 500
 SNDK;Sandisk;S&P 500
@@ -409,7 +409,7 @@ SRE;Sempra;S&P 500
 NOW;ServiceNow;S&P 500
 SHW;Sherwin-Williams;S&P 500
 SPG;Simon Property Group;S&P 500
-SKYD;Skydance Corporation;S&P 500
+SKYD;Skydance;S&P 500
 SWKS;Skyworks Solutions;S&P 500
 SJM;J.M. Smucker Company (The);S&P 500
 SW;Smurfit Westrock;S&P 500
