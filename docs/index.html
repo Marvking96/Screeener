@@ -164,7 +164,9 @@ const state = {
   merkliste: speicher.lies("merkliste", []),         // Liste von Kürzeln
   waehrung: speicher.lies("waehrung", "orig"),       // "orig" (Heimatwährung) oder "eur"
   positionen: speicher.lies("positionen", {}),      // simulierte Positionen je Kürzel
-  alle: new Map()
+  alle: new Map(),
+  kurse: new Map(), kurseLaden: new Map(),            // nachgeladene Kursverläufe (Aktien ohne Signal)
+  chartOffen: {}                                      // Chart in der einfachen Karte auf-/zugeklappt
 };
 if (!Array.isArray(state.merkliste)) state.merkliste = [];
 if (!state.positionen || typeof state.positionen !== "object" || Array.isArray(state.positionen)) state.positionen = {};
@@ -224,6 +226,7 @@ const istObjekt = o => !!o && typeof o === "object" && !Array.isArray(o);
 const position = k => { const p = state.positionen[k]; return istObjekt(p) && p.kauf > 0 ? p : null; };
 function positionSpeichern(k, p) {
   if (p) state.positionen[k] = p; else delete state.positionen[k];
+  if (p && state.chartOffen) delete state.chartOffen[k];      // nach dem Speichern den Chart wieder zeigen
   speicher.schreib("positionen", state.positionen);
 }
 const anzeigeWaehrung = e => (waehrungVon(e) === "USD" && !euroModus()) ? "USD" : "EUR";
@@ -233,7 +236,16 @@ function umrechnen(v, von, nach) {                 // EUR <-> USD mit dem heutig
   return von === "EUR" ? v * r : v / r;
 }
 // Eintrag mit Kursverlauf (Signal oder Setup) zu einem Kürzel, sonst der einfache Eintrag
-const mitKursen = (k, ersatz) => [...state.daten.signale, ...state.daten.setups].find(x => x.kuerzel === k && x.kurse) || ersatz;
+const mitKursen = (k, ersatz) => [...state.daten.signale, ...state.daten.setups].find(x => x.kuerzel === k && x.kurse) ||
+  (state.kurse.get(k) ? {...ersatz, kurse: state.kurse.get(k)} : ersatz);
+// Kursverlauf einer Aktie aus docs/kurse/<Kürzel>.json nachladen (einmal je Sitzung)
+function ladeKurse(k) {
+  if (!state.kurseLaden.has(k)) state.kurseLaden.set(k,
+    fetch("kurse/" + encodeURIComponent(k.replace("/", "_")) + ".json", {cache: "no-cache"})
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(K => state.kurse.set(k, K && Array.isArray(K.d) && Array.isArray(K.c) && K.d.length > 1 ? K : null)));
+  return state.kurseLaden.get(k);
+}
 
 // alle Werte in der Anzeigewährung; Ergebnis, Abstände und ob Stop/Ziel seit dem Kauf berührt wurden
 function positionAuswerten(e, p) {
@@ -244,7 +256,7 @@ function positionAuswerten(e, p) {
   const sk = u(p.slipKauf) || 0, sv = u(p.slipVerkauf) || 0, je = sk + sv;
   const inAnzeige = v => v ? umrechnen(v, "EUR", nach) : 0, gk = inAnzeige(p.gebKauf), gv = inAnzeige(p.gebVerkauf);
   const r = {K, S, Z, P, long, n, datum: p.datum || null, sk, sv, gk, gv,
-    mitKosten: !!(sk || sv || gk || gv), kostenErfasst: p.gebKauf != null || p.gebVerkauf != null || p.slipKauf != null || p.slipVerkauf != null};
+    mitKosten: n ? !!(sk || sv || gk || gv) : !!(sk || sv), nurGebuehrOhneStueck: !n && !!(gk || gv), kostenErfasst: p.gebKauf != null || p.gebVerkauf != null || p.slipKauf != null || p.slipVerkauf != null};
   // Ergebnis nach Kosten, wenn zum Kurs X verkauft (Long) bzw. zurückgekauft (Short) wird
   const netto = X => vz * n * (X - K) - n * je - gk - gv;
   if (n) { r.einsatz = n * K + n * sk + gk; r.kosten = n * je + gk + gv; }
@@ -356,6 +368,7 @@ function positionsBlock(e) {
     const umger = (p.waehrung || waehrungVon(e)) !== anzeigeWaehrung(e);
     box.append(el("p", {class: "hint", text: (a.mitKosten
         ? "Ergebnisse nach Gebühren und Spread" + (a.n ? "" : " (Gebühren erst mit Stückzahl)") + ", vor Steuern. "
+        : a.nurGebuehrOhneStueck ? "Gebühren werden erst mit Stückzahl eingerechnet. "
         : (a.kostenErfasst ? "Ohne Kosten (alle auf 0). " : "Noch ohne Gebühren und Spread – über „Bearbeiten“ eintragen. ")) +
       "Gespeichert nur auf diesem Gerät, bis du sie löschst." +
       (umger ? " Eingegeben in " + (p.waehrung === "EUR" ? "€" : "$") + ", hier mit dem heutigen Wechselkurs umgerechnet." : "")}));
@@ -499,7 +512,7 @@ function chartBauen(e, R, opt) {
   const farbe = long ? "var(--long)" : "var(--short)";
   const p2 = R.p2, p3 = R.p3;
   const pos = opt.position || null;
-  const alle = h.concat(l, [p2, p3], pos ? [pos.K, pos.S, pos.Z, pos.BE].filter(v => v != null) : []);
+  const alle = h.concat(l, [p2, p3].filter(Number.isFinite), pos ? [pos.K, pos.S, pos.Z, pos.BE].filter(v => v != null) : []);
   let lo = Math.min(...alle), hi = Math.max(...alle);
   const pad = (hi - lo) * 0.14 || 1; lo -= pad; hi += pad;
   const auto = {lo, hi};
@@ -531,7 +544,7 @@ function chartBauen(e, R, opt) {
   s.firstChild.append(sv("clipPath", {id: cid}));
   s.firstChild.firstChild.append(sv("path", {d: "M" + pl + " " + pt + "H" + (W - pr) + "V" + Math.max(pt + 1, preisUnten) + "H" + pl + "Z"}));
   // Hilfslinien für Punkt 2 und Punkt 3
-  [[p2, farbe], [p3, "var(--muted)"]].forEach(([wert, col]) => {
+  [[p2, farbe], [p3, "var(--muted)"]].filter(([wert]) => Number.isFinite(wert)).forEach(([wert, col]) => {
     P.append(sv("line", {x1: pl, x2: W - pr, y1: y(wert), y2: y(wert), stroke: col, "stroke-width": 1,
       "stroke-dasharray": "4 3", opacity: 0.8}));
   });
@@ -552,8 +565,8 @@ function chartBauen(e, R, opt) {
   }
   // Beschriftungen rechts, ohne dass sie sich überlappen
   const beschr = [
-    {y: y(p2) + 4, text: "2: " + zahl.format(p2), col: farbe, fett: 600},
-    {y: y(p3) + 4, text: "3: " + zahl.format(p3), col: "var(--muted)", fett: 600},
+    ...(Number.isFinite(p2) ? [{y: y(p2) + 4, text: "2: " + zahl.format(p2), col: farbe, fett: 600}] : []),
+    ...(Number.isFinite(p3) ? [{y: y(p3) + 4, text: "3: " + zahl.format(p3), col: "var(--muted)", fett: 600}] : []),
     {y: y(c[n - 1]) + 4, text: zahl.format(c[n - 1]), col: "var(--accent)", fett: 400},
     ...(pos ? [[pos.K, "K", "var(--accent)"], [pos.S, "S", "var(--short)"], [pos.Z, "Z", "var(--long)"], [pos.BE, "BE", "var(--accent)"]]
       .filter(([v]) => v != null).map(([v, t, col]) => ({y: y(v) + 4, text: t + " " + zahl.format(v), col, fett: 700})) : []),
@@ -870,6 +883,72 @@ function badgeAlt(e) {
     ? el("span", {class: "badge alt", text: "Daten vom " + kurzDatum(e.stand)}) : null;
 }
 
+// Chart mit Umschaltern (Kerzen/Linie, Zeitraum, Vollbild); Antippen einer Kerze zeigt das Popup.
+// art: "signale", "setups" oder "kurse" (Aktie ohne 1-2-3-Muster)
+function chartBereich(e, art) {
+  const wrap = el("div");
+  const hatKerzen = !!(e.kurse.o && e.kurse.h && e.kurse.l);
+  let wahl = null;
+  const bauen = () => {
+    wrap.replaceChildren();
+    const ctrl = el("div", {class: "ctrl"});
+    const knopf = (text, gruppe, wert) => {
+      const b = el("button", {class: "chip", type: "button", text: text, "aria-pressed": String(state[gruppe] === wert)});
+      b.addEventListener("click", () => { state[gruppe] = wert; speicher.schreib(gruppe, wert); bauen(); });
+      return b;
+    };
+    if (hatKerzen) { ctrl.append(knopf("Kerzen", "ansicht", "kerzen"), knopf("Linie", "ansicht", "linie"), el("span", {class: "sep"})); }
+    ctrl.append(knopf("Auto", "zeitraum", "auto"), knopf("3 Monate", "zeitraum", "3m"), knopf("Alles", "zeitraum", "alles"), el("span", {class: "sep"}));
+    const vb = el("button", {class: "chip", type: "button", text: "⤢ Vollbild"});
+    vb.addEventListener("click", () => vollbild(e));
+    ctrl.append(vb);
+    const kerzenModus = hatKerzen && state.ansicht === "kerzen";
+    const box = el("div", {class: "cbox"});
+    const zeigeChart = () => {
+      box.replaceChildren();
+      const R = reihen(e), m = fensterGroesse(e, R.c.length);
+      const bau = chartBauen(e, R, {W: 360, H: 270, start: R.c.length - m, anzahl: m, leer: leerStd(m), kerzen: state.ansicht === "kerzen",
+        volumen: true, volAnteil: 0.15, wahl, position: positionFuerChart(e)});
+      bau.svg.addEventListener("click", ev => { wahl = bau.indexAus(ev.clientX); zeigeChart(); });
+      box.append(bau.svg);
+      if (wahl != null) {
+        const gehe = dd => { wahl = Math.max(bau.s0, Math.min(bau.s0 + bau.m - 1, wahl + dd)); zeigeChart(); };
+        box.append(popupBauen(e, R, wahl, bau, {zurueck: () => gehe(-1), vor: () => gehe(1), zu: () => { wahl = null; zeigeChart(); }}));
+      }
+    };
+    zeigeChart();
+    const muster = art === "kurse" ? "" : "Zahlen = 1-2-3-Punkte, bestimmt nach Schlusskurs" + (art === "signale" ? ". Stern = Ausbruch. " : ". ");
+    wrap.append(ctrl, box,
+      el("p", {class: "hint", text: (kerzenModus ? "Tageskerzen (grün = Schluss über Eröffnung), darunter das Volumen. Tippe auf eine Kerze für Details. " : "Schlusskurse. ") +
+        muster + "Preise in " + zeichenVon(e) + (faktor(e) !== 1 ? ", alle Tage mit dem heutigen Wechselkurs umgerechnet." : ".")}));
+  };
+  bauen();
+  return wrap;
+}
+
+// Chart für Aktien ohne aktuelles Signal: auf Wunsch (bei einer Position automatisch) nachladen und anzeigen
+function kursChart(a, neuZeichnen) {
+  const k = a.kuerzel, wrap = el("div", {class: "kchart"});
+  const render = () => {
+    wrap.replaceChildren();
+    const offen = state.chartOffen[k] != null ? state.chartOffen[k] : !!position(k);
+    const b = el("button", {class: "knopf", type: "button", text: offen ? "Chart ausblenden" : "Chart anzeigen", "aria-expanded": String(offen)});
+    b.addEventListener("click", () => { state.chartOffen[k] = !offen; render(); });
+    wrap.append(b);
+    if (!offen) return;
+    if (!state.kurse.has(k)) {
+      wrap.append(el("p", {class: "hint", text: "Chart wird geladen …"}));
+      ladeKurse(k).then(() => neuZeichnen());     // ganze Karte neu, damit auch die Position die Kurse nutzt
+      return;
+    }
+    const K = state.kurse.get(k);
+    if (!K) { wrap.append(el("p", {class: "hint", text: "Für diese Aktie gibt es noch keinen Kursverlauf. Er kommt mit dem nächsten Lauf des Screeners."})); return; }
+    wrap.append(el("div", {style: "height:8px"}), chartBereich({...a, kurse: K, kette: []}, "kurse"));
+  };
+  render();
+  return wrap;
+}
+
 function karte(e, art) {
   const long = e.richtung === "long";
   const schluessel = art + e.kuerzel + e.richtung;
@@ -890,7 +969,6 @@ function karte(e, art) {
   const k = el("div", {class: "card" + (offen ? " open" : "")}, el("div", {class: "top"}, kopf, stern(e.kuerzel)));
   const detail = el("div", {class: "detail"});
   k.append(detail);
-  const hatKerzen = !!(e.kurse.o && e.kurse.h && e.kurse.l);
   const fuellen = () => {
     detail.replaceChildren();
     const fakten = el("div", {class: "facts"},
@@ -898,38 +976,7 @@ function karte(e, art) {
       el("div", {}, el("b", {text: geld(e, e.punkt3)}), el("span", {text: "Punkt 3"})),
       el("div", {}, el("b", {text: art === "signale" ? datumDE(e.signaltag) : zahl.format(e.abstand) + " %"}),
         el("span", {text: art === "signale" ? "Ausbruchstag" : "bis zum Ausbruch"})));
-    const ctrl = el("div", {class: "ctrl"});
-    const knopf = (text, gruppe, wert) => {
-      const b = el("button", {class: "chip", type: "button", text: text, "aria-pressed": String(state[gruppe] === wert)});
-      b.addEventListener("click", () => { state[gruppe] = wert; speicher.schreib(gruppe, wert); fuellen(); });
-      return b;
-    };
-    if (hatKerzen) { ctrl.append(knopf("Kerzen", "ansicht", "kerzen"), knopf("Linie", "ansicht", "linie"), el("span", {class: "sep"})); }
-    ctrl.append(knopf("Auto", "zeitraum", "auto"), knopf("3 Monate", "zeitraum", "3m"), knopf("Alles", "zeitraum", "alles"), el("span", {class: "sep"}));
-    const vb = el("button", {class: "chip", type: "button", text: "⤢ Vollbild"});
-    vb.addEventListener("click", () => vollbild(e));
-    ctrl.append(vb);
-    const kerzenModus = hatKerzen && state.ansicht === "kerzen";
-    // Chart mit Auswahl: Antippen einer Kerze zeigt das Popup
-    const box = el("div", {class: "cbox"});
-    let wahl = null;
-    const zeigeChart = () => {
-      box.replaceChildren();
-      const R = reihen(e), m = fensterGroesse(e, R.c.length);
-      const bau = chartBauen(e, R, {W: 360, H: 270, start: R.c.length - m, anzahl: m, leer: leerStd(m), kerzen: state.ansicht === "kerzen",
-        volumen: true, volAnteil: 0.15, wahl, position: positionFuerChart(e)});
-      bau.svg.addEventListener("click", ev => { wahl = bau.indexAus(ev.clientX); zeigeChart(); });
-      box.append(bau.svg);
-      if (wahl != null) {
-        const gehe = dd => { wahl = Math.max(bau.s0, Math.min(bau.s0 + bau.m - 1, wahl + dd)); zeigeChart(); };
-        box.append(popupBauen(e, R, wahl, bau, {zurueck: () => gehe(-1), vor: () => gehe(1), zu: () => { wahl = null; zeigeChart(); }}));
-      }
-    };
-    zeigeChart();
-    detail.append(fakten, volumenZeile(e), positionsBlock(e), ctrl, box,
-      el("p", {class: "hint", text: (kerzenModus ? "Tageskerzen (grün = Schluss über Eröffnung), darunter das Volumen. Tippe auf eine Kerze für Details. " : "Schlusskurse. ") +
-        "Zahlen = 1-2-3-Punkte, bestimmt nach Schlusskurs" + (art === "signale" ? ". Stern = Ausbruch." : ".") +
-        " Preise in " + zeichenVon(e) + (faktor(e) !== 1 ? ", alle Tage mit dem heutigen Wechselkurs umgerechnet." : ".")}));
+    detail.append(fakten, volumenZeile(e), positionsBlock(e), chartBereich(e, art));
   };
   if (offen) fuellen();
   kopf.addEventListener("click", () => {
@@ -961,7 +1008,8 @@ function einfacheKarte(a) {
   if (!treffer.length && a.kurs != null)
     info.append(el("div", {class: "meta", text: "Aktuell kein 1-2-3-Signal oder Setup", style: "grid-column:1 / -1"}));
   const karteE = el("div", {class: "card"}, el("div", {class: "top"}, info, stern(a.kuerzel)));
-  if (a.kurs != null) karteE.append(el("div", {class: "pwrap"}, positionsBlock(mitKursen(a.kuerzel, a))));
+  if (a.kurs != null) karteE.append(el("div", {class: "pwrap"}, positionsBlock(mitKursen(a.kuerzel, a)),
+    kursChart(a, () => { if (karteE.isConnected) karteE.replaceWith(einfacheKarte(a)); })));
   return karteE;
 }
 
