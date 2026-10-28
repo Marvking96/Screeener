@@ -10,6 +10,7 @@ import yfinance as yf
 # ---- Einstellungen (hier kannst du später Werte ändern) ----
 LISTE = "aktien.csv"   # wird von liste_erstellen.py angelegt
 AUSGABE = os.path.join("docs", "ergebnis.json")   # diese Datei liest die Web-App
+KURS_ORDNER = os.path.join("docs", "kurse")       # je Aktie eine kleine Datei mit Kerzen (für Charts ohne Signal)
 ZEITRAUM = "1y"        # so viel Kursverlauf wird geladen
 N = 5                  # Fenster: so viele Tage links und rechts werden verglichen
 MAX_ALTER_TAGE = 5     # Signale, die älter sind (in Handelstagen), werden nicht angezeigt
@@ -203,25 +204,48 @@ def volumen_kennzahlen(serien, indizes):
     return kennzahlen
 
 
+def kerzen_daten(df):
+    """Die letzten KURS_TAGE Kerzen im Format der App: Datum, Eröffnung, Hoch, Tief, Schluss, Volumen (Tausend Stück)."""
+    fenster = df.iloc[-KURS_TAGE:]
+    stellen = 3 if float(df["Close"].iloc[-1]) < 5 else 2      # sehr billige Aktien brauchen eine Stelle mehr
+
+    def runde(spalte):
+        return [round(float(x), stellen) for x in fenster[spalte].values]
+
+    return {"d": [d.strftime("%Y-%m-%d") for d in fenster.index], "o": runde("Open"), "h": runde("High"),
+            "l": runde("Low"), "c": runde("Close"), "v": [int(round(float(x) / 1000)) for x in fenster["Volume"].values]}
+
+
+def schreibe_kursdateien(serien):
+    """Schreibt docs/kurse/<Kürzel>.json für jede Aktie und löscht Dateien von Aktien, die nicht mehr dabei sind."""
+    if not serien:
+        return
+    os.makedirs(KURS_ORDNER, exist_ok=True)
+    namen = set()
+    for ticker, df in serien.items():
+        datei = ticker.replace("/", "_") + ".json"
+        namen.add(datei)
+        with open(os.path.join(KURS_ORDNER, datei), "w", encoding="utf-8") as f:
+            json.dump(kerzen_daten(df), f, separators=(",", ":"))
+    for datei in os.listdir(KURS_ORDNER):
+        if datei.endswith(".json") and datei not in namen:
+            os.remove(os.path.join(KURS_ORDNER, datei))
+    print(f"Kursdateien für {len(namen)} Aktien in {KURS_ORDNER} geschrieben")
+
+
 def baue_eintrag(ticker, name, index_name, df, t):
     """Wandelt einen Treffer in einen Eintrag für die JSON-Datei um (inklusive Kerzendaten für den Chart)."""
     close = df["Close"]
     fenster = df.iloc[-KURS_TAGE:]
     start_pos = len(df) - len(fenster)
-    daten = [d.strftime("%Y-%m-%d") for d in fenster.index]
-
-    stellen = 3 if t["kurs"] < 5 else 2      # sehr billige Aktien brauchen eine Stelle mehr
-
-    def runde(spalte):
-        return [round(float(x), stellen) for x in fenster[spalte].values]
+    stellen = 3 if t["kurs"] < 5 else 2
 
     eintrag = {
         "kuerzel": ticker, "name": name, "index": index_name, "waehrung": WAEHRUNG.get(index_name, "EUR"),
         "richtung": t["richtung"],
         "stand": close.index[-1].strftime("%Y-%m-%d"),
         "punkt2": round(t["punkt2"], 2), "punkt3": round(t["punkt3"], 2), "kurs": round(t["kurs"], 2),
-        "kurse": {"d": daten, "o": runde("Open"), "h": runde("High"), "l": runde("Low"), "c": runde("Close"),
-                  "v": [int(round(float(x) / 1000)) for x in fenster["Volume"].values]},     # Volumen in Tausend Stück
+        "kurse": kerzen_daten(df),
         "kette": [{"d": close.index[i].strftime("%Y-%m-%d"), "nr": nr, "c": round(float(close.iloc[i]), stellen)}
                   for i, nr in t["kette"] if i >= start_pos],
     }
@@ -454,6 +478,7 @@ def main():
         "eur_usd": eur_usd, "eur_usd_datum": eur_usd_datum,
     }
     os.makedirs(os.path.dirname(AUSGABE), exist_ok=True)
+    schreibe_kursdateien(serien)
     with open(AUSGABE, "w", encoding="utf-8") as f:
         json.dump(ergebnis, f, ensure_ascii=False, separators=(",", ":"))
 
