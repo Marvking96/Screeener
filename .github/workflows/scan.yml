@@ -3,7 +3,6 @@ name: Screener
 on:
   schedule:
     - cron: "15 22 * * 1-5"   # Mo-Fr um 22:15 UTC, nach Börsenschluss in den USA
-    - cron: "15 5 * * 2-6"    # Di-Sa um 05:15 UTC (früh morgens): holt die DAX-Kurse des Vortags nach
   workflow_dispatch:           # erlaubt den Start per Knopfdruck
 
 concurrency:                   # nie zwei Läufe gleichzeitig
