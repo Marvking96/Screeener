@@ -32,9 +32,11 @@ h1{font-size:22px;margin:8px 0 2px;letter-spacing:-.01em}
 .warn{background:#ff9f1c22;border:1px solid #ff9f1c88;border-radius:10px;padding:10px 12px;
   font-size:14px;margin:0 0 12px}
 .tabs{display:flex;background:var(--chip);border-radius:12px;padding:3px;margin-bottom:12px}
-.tabs button{flex:1;border:0;background:none;color:var(--muted);font:inherit;font-size:15px;font-weight:600;
-  padding:7px 2px;border-radius:9px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:1px;line-height:1.15}
+.tabs button{flex:1;min-width:0;border:0;background:none;color:var(--muted);font:inherit;font-size:14px;font-weight:600;letter-spacing:-.01em;
+  padding:7px 1px;border-radius:9px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:1px;line-height:1.15}
 .tabs button small{font-size:12px;font-weight:600;opacity:.75}
+.tabs button{flex:1 1 auto}
+@media (max-width:400px){.tabs button{font-size:13px}.tabs button small{font-size:11px}}
 .tabs button[aria-selected="true"]{background:var(--card);color:var(--text);box-shadow:0 1px 3px #0003}
 .filters{margin-bottom:10px}
 .filters .row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
@@ -141,6 +143,7 @@ footer{color:var(--muted);font-size:12px;padding:14px 4px 28px}
   <div class="tabs" role="tablist">
     <button role="tab" id="tab-signale" aria-selected="true">Signale</button>
     <button role="tab" id="tab-setups" aria-selected="false">Setups</button>
+    <button role="tab" id="tab-ruecksetzer" aria-selected="false">Rücksetzer</button>
     <button role="tab" id="tab-merkliste" aria-selected="false">Watchlist</button>
     <button role="tab" id="tab-rechner" aria-selected="false">Rechner</button>
   </div>
@@ -236,7 +239,8 @@ function umrechnen(v, von, nach) {                 // EUR <-> USD mit dem heutig
   return von === "EUR" ? v * r : v / r;
 }
 // Eintrag mit Kursverlauf (Signal oder Setup) zu einem Kürzel, sonst der einfache Eintrag
-const mitKursen = (k, ersatz) => [...state.daten.signale, ...state.daten.setups].find(x => x.kuerzel === k && x.kurse) ||
+const alleMuster = () => [...state.daten.signale, ...state.daten.setups, ...(state.daten.ruecksetzer || [])];
+const mitKursen = (k, ersatz) => alleMuster().find(x => x.kuerzel === k && x.kurse) ||
   (state.kurse.get(k) ? {...ersatz, kurse: state.kurse.get(k)} : ersatz);
 // Kursverlauf einer Aktie aus docs/kurse/<Kürzel>.json nachladen (einmal je Sitzung)
 function ladeKurse(k) {
@@ -407,7 +411,7 @@ function positionsBlock(e) {
     const kaufStd = p ? p.kauf : vor(e.kurs), stopStd = p ? p.stop : vor(e.punkt3 != null ? e.punkt3 : null);
     const gitter = el("div", {class: "grid2"},
       feld("kauf", "Kaufkurs", kaufStd), feld("stop", "Stop", stopStd),
-      feld("ziel", "Kursziel", p ? p.ziel : null), feld("stueck", "Stückzahl (optional)", p ? p.stueck : null),
+      feld("ziel", "Kursziel", p ? p.ziel : vor(e.zielVorschlag != null ? e.zielVorschlag : null)), feld("stueck", "Stückzahl (optional)", p ? p.stueck : null),
       feld("datum", "Kaufdatum", p ? p.datum : (state.daten.letzter_handelstag || e.stand), "date"));
     // Kosten: bei neuer Position aus dem Rechner übernehmen, sonst 1 € je Order (Trade Republic)
     const rech = speicher.lies("rechner", {}), ausRechner = id => { const v = istObjekt(rech) ? parseZahl(rech[id]) : null; return v == null || Number.isNaN(v) ? null : v; };
@@ -953,11 +957,14 @@ function karte(e, art) {
   const long = e.richtung === "long";
   const schluessel = art + e.kuerzel + e.richtung;
   const offen = state.offen === schluessel;
+  const rs = art === "ruecksetzer";
   const rechts = art === "signale"
     ? el("div", {class: "right"}, handelstage(e.tage_her))
+    : rs ? el("div", {class: "right"}, zahl.format(e.abstand) + " % " + (long ? "über" : "unter") + " 3")
     : el("div", {class: "right"}, "noch " + zahl.format(e.abstand) + " %");
   const unten = art === "signale"
     ? "Ausbruch " + (long ? "über " : "unter ") + geld(e, e.punkt2) + " · Kurs " + geld(e, e.kurs)
+    : rs ? "Punkt 3 bei " + geld(e, e.punkt3) + " · Kurs " + geld(e, e.kurs) + (e.crv != null ? " · CRV 1 : " + zahl.format(e.crv) : "")
     : "Ausbruch bei " + geld(e, e.punkt2) + " · Kurs " + geld(e, e.kurs);
   const kopf = el("button", {class: "head", type: "button", "aria-expanded": String(offen)},
     el("div", {class: "name", text: e.name}),
@@ -972,11 +979,13 @@ function karte(e, art) {
   const fuellen = () => {
     detail.replaceChildren();
     const fakten = el("div", {class: "facts"},
-      el("div", {}, el("b", {text: geld(e, e.punkt2)}), el("span", {text: "Punkt 2"})),
-      el("div", {}, el("b", {text: geld(e, e.punkt3)}), el("span", {text: "Punkt 3"})),
-      el("div", {}, el("b", {text: art === "signale" ? datumDE(e.signaltag) : zahl.format(e.abstand) + " %"}),
-        el("span", {text: art === "signale" ? "Ausbruchstag" : "bis zum Ausbruch"})));
-    detail.append(fakten, volumenZeile(e), positionsBlock(e), chartBereich(e, art));
+      el("div", {}, el("b", {text: geld(e, e.punkt2)}), el("span", {text: rs ? "Punkt 2 · Ziel" : "Punkt 2"})),
+      el("div", {}, el("b", {text: geld(e, e.punkt3)}), el("span", {text: rs ? "Punkt 3 · Stop" : "Punkt 3"})),
+      rs ? el("div", {}, el("b", {text: e.crv != null ? "1 : " + zahl.format(e.crv) : zahl.format(e.abstand) + " %"}),
+             el("span", {text: e.crv != null ? "CRV bis Punkt 2" : "Abstand zu 3"}))
+        : el("div", {}, el("b", {text: art === "signale" ? datumDE(e.signaltag) : zahl.format(e.abstand) + " %"}),
+             el("span", {text: art === "signale" ? "Ausbruchstag" : "bis zum Ausbruch"})));
+    detail.append(fakten, volumenZeile(e), positionsBlock(rs ? {...e, zielVorschlag: e.punkt2} : e), chartBereich(e, art));
   };
   if (offen) fuellen();
   kopf.addEventListener("click", () => {
@@ -995,6 +1004,7 @@ function einfacheKarte(a) {
   const treffer = [];
   state.daten.signale.forEach(x => { if (x.kuerzel === a.kuerzel) treffer.push({r: x.richtung, t: "Signal"}); });
   state.daten.setups.forEach(x => { if (x.kuerzel === a.kuerzel) treffer.push({r: x.richtung, t: "Setup"}); });
+  state.daten.ruecksetzer.forEach(x => { if (x.kuerzel === a.kuerzel) treffer.push({r: x.richtung, t: "Rücksetzer"}); });
   const meta = el("div", {class: "meta"});
   treffer.forEach(t => meta.append(el("span", {class: "badge " + t.r, text: t.t + (t.r === "long" ? " Long" : " Short")})));
   meta.append(document.createTextNode(a.kuerzel + (a.index ? " · " + a.index : "") + (a.volumen_klasse ? " · Vol. " + a.volumen_klasse : "")));
@@ -1187,7 +1197,7 @@ function rechnerSeite(ziel) {
 /* ---------- Anzeige ---------- */
 function tabBeschriftung() {
   const d = state.daten;
-  const tabs = {signale: ["Signale", d.signale.length], setups: ["Setups", d.setups.length],
+  const tabs = {signale: ["Signale", d.signale.length], setups: ["Setups", d.setups.length], ruecksetzer: ["Rücksetzer", d.ruecksetzer.length],
     merkliste: ["Watchlist", state.merkliste.length], rechner: ["Rechner", "Kursziel"]};
   for (const [name, [text, unten]] of Object.entries(tabs)) {
     const b = document.getElementById("tab-" + name);
@@ -1228,6 +1238,7 @@ function zeichne() {
       const mitMuster = [];
       d.signale.forEach(e => { if (e.kuerzel === k) mitMuster.push(karte(e, "signale")); });
       d.setups.forEach(e => { if (e.kuerzel === k) mitMuster.push(karte(e, "setups")); });
+      d.ruecksetzer.forEach(e => { if (e.kuerzel === k) mitMuster.push(karte(e, "ruecksetzer")); });
       if (mitMuster.length) mitMuster.forEach(c => ziel.append(c));
       else ziel.append(einfacheKarte(state.alle.get(k) || {kuerzel: k, name: k, index: ""}));
     });
@@ -1240,14 +1251,18 @@ function zeichne() {
     (state.volumen === "alle" || e.volumen_klasse === state.volumen) && passt(e));
   if (!liste.length)
     return leer(d[art].length ? "Nichts gefunden. Filter anpassen." :
-      art === "signale" ? "Keine frischen Signale." : "Keine aktiven Setups.");
+      art === "signale" ? "Keine frischen Signale." : art === "ruecksetzer" ? "Keine Rücksetzer nahe Punkt 3." : "Keine aktiven Setups.");
+  if (art === "ruecksetzer")
+    ziel.append(el("p", {class: "hint", style: "margin:0 0 10px", text: "Bestätigter Trend (schon über einen Punkt 2 ausgebrochen), der Kurs korrigiert und liegt höchstens " +
+      zahl.format((d.einstellungen && d.einstellungen.max_ruecksetzer_prozent) || 3).replace(",00", "") +
+      " % vor dem letzten Punkt 3. Mögliche Idee: Einstieg nahe 3, Stop unter 3, Ziel Punkt 2. Bricht der Kurs unter 3, ist der Trend gebrochen."}));
   liste.forEach(e => ziel.append(karte(e, art)));
 }
 
 function anzeigeLeiste() {
   const z = document.getElementById("anzeige"); z.replaceChildren();
   const d = state.daten;
-  const gibtUSD = [...d.signale, ...d.setups, ...state.alle.values()].some(e => waehrungVon(e) === "USD");
+  const gibtUSD = [...alleMuster(), ...state.alle.values()].some(e => waehrungVon(e) === "USD");
   if (!d.eur_usd || !gibtUSD) return;
   const zeile = el("div", {class: "filters row", style: "display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px"});
   [["Original ($ / €)", "orig"], ["Alles in Euro", "eur"]].forEach(([text, wert]) => {
@@ -1270,12 +1285,12 @@ function filterLeiste() {
     return b;
   };
   [["Alle", "alle"], ["Long", "long"], ["Short", "short"]].forEach(([t, w]) => zeile1.append(mk(t, "richtung", w)));
-  const indizes = [...new Set([...state.alle.values(), ...state.daten.signale, ...state.daten.setups].map(e => e.index))]
+  const indizes = [...new Set([...state.alle.values(), ...alleMuster()].map(e => e.index))]
     .filter(Boolean);
   zeile2.append(mk("Alle Indizes", "index", "alle"));
   indizes.forEach(i => zeile2.append(mk(i, "index", i)));
   f.append(zeile1, zeile2);
-  if ([...state.daten.signale, ...state.daten.setups].some(e => e.volumen_klasse)) {   // nur wenn die Ergebnisdatei Volumen enthält
+  if (alleMuster().some(e => e.volumen_klasse)) {   // nur wenn die Ergebnisdatei Volumen enthält
     const zeile3 = el("div", {class: "row"}, el("span", {class: "meta", text: "Volumen"}));
     [["Alle", "alle"], ["Hoch", "hoch"], ["Mittel", "mittel"], ["Niedrig", "niedrig"]].forEach(([t, w]) => zeile3.append(mk(t, "volumen", w)));
     f.append(zeile3);
@@ -1283,7 +1298,7 @@ function filterLeiste() {
 }
 
 async function start() {
-  [["signale", "tab-signale"], ["setups", "tab-setups"], ["merkliste", "tab-merkliste"], ["rechner", "tab-rechner"]].forEach(([tab, id]) =>
+  [["signale", "tab-signale"], ["setups", "tab-setups"], ["ruecksetzer", "tab-ruecksetzer"], ["merkliste", "tab-merkliste"], ["rechner", "tab-rechner"]].forEach(([tab, id]) =>
     document.getElementById(id).addEventListener("click", () => { state.tab = tab; state.suche = ""; document.getElementById("suche").value = ""; zeichne(); }));
   document.getElementById("suche").addEventListener("input", ev => { state.suche = ev.target.value; zeichne(); });
   let d;
@@ -1297,10 +1312,11 @@ async function start() {
       text: "Noch keine Ergebnisdatei vorhanden oder keine Verbindung. (" + fehler.message + ")"}));
     return;
   }
+  if (!Array.isArray(d.ruecksetzer)) d.ruecksetzer = [];     // ältere Ergebnisdateien
   state.daten = d;
   // alle Aktien (ältere Ergebnisdateien ohne "alle": Treffer als Ersatz)
   (d.alle || []).forEach(a => state.alle.set(a.kuerzel, a));
-  [...d.signale, ...d.setups].forEach(e => {
+  alleMuster().forEach(e => {
     if (!state.alle.has(e.kuerzel)) state.alle.set(e.kuerzel, {kuerzel: e.kuerzel, name: e.name, index: e.index,
       kurs: e.kurs, veraenderung: 0, stand: e.stand});
   });
