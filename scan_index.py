@@ -15,6 +15,7 @@ ZEITRAUM = "1y"        # so viel Kursverlauf wird geladen
 N = 5                  # Fenster: so viele Tage links und rechts werden verglichen
 MAX_ALTER_TAGE = 5     # Signale, die älter sind (in Handelstagen), werden nicht angezeigt
 MAX_ABSTAND_PROZENT = 5  # aktive Setups werden nur gezeigt, wenn der Kurs höchstens so weit vom Ausbruch entfernt ist
+MAX_RUECKSETZER_PROZENT = 3  # Rücksetzer im Trend: Kurs höchstens so weit über (Long) bzw. unter (Short) dem letzten Punkt 3
 BLOCK = 100            # so viele Aktien werden pro Abruf geladen
 KURS_TAGE = 160        # so viele Handelstage (Open/High/Low/Close) bekommt jeder Treffer für den Chart in der App
 VOLUMEN_TAGE = 20      # so viele Handelstage zählen für das durchschnittliche Handelsvolumen
@@ -123,6 +124,14 @@ def suche_123(close, punkte, richtung):
                 phase = "nach_2"
             # ein niedrigeres Hoch zwischen 3 und dem nächsten 2 wird ignoriert
 
+    # Rücksetzer: bestätigter Trend (die Kette hatte schon einen Punkt 3 und danach einen Ausbruch zu einem neuen 2),
+    # jetzt läuft die Korrektur zum nächsten Punkt 3. Der letzte Punkt 3 (anker) ist die Linie, die halten muss.
+    ruecksetzer = None
+    if phase == "nach_2" and any(n == 3 for _, n in kette):
+        idx2 = kette[-1][0]
+        if all(werte[j] >= anker for j in range(idx2 + 1, len(werte))):     # seit dem letzten 2 kein Schluss unter 3
+            ruecksetzer = (vz * ebene2, vz * anker)
+
     zustand = None
     if phase == "nach_3":                           # offenes Setup am Ende der Daten
         j = finde_ausbruch(werte, idx3, ebene2, ebene3, len(werte) - 1)
@@ -132,7 +141,7 @@ def suche_123(close, punkte, richtung):
             zustand = (vz * ebene2, vz * ebene3)    # wartet auf Ausbruch
     if any(n == 3 for _, n in kette):
         ketten.append(kette)
-    return ketten, signale, zustand
+    return ketten, signale, zustand, ruecksetzer
 
 
 def waehle_kette(ketten, close, e3):
@@ -153,7 +162,7 @@ def pruefe_aktie(close):
     kurs = float(close.iloc[-1])
     treffer = []
     for richtung in ("auf", "ab"):
-        ketten, signale, zustand = suche_123(close, punkte, richtung)
+        ketten, signale, zustand, ruecksetzer = suche_123(close, punkte, richtung)
         for j, e2, e3 in signale:
             alter = letzter - j
             if alter <= MAX_ALTER_TAGE:
@@ -167,6 +176,16 @@ def pruefe_aktie(close):
                                 "signal_index": None, "abstand": abstand, "punkt2": zustand[0],
                                 "punkt3": zustand[1], "kurs": kurs,
                                 "kette": waehle_kette(ketten, close, zustand[1])})
+        if ruecksetzer:
+            e2, e3 = ruecksetzer
+            ueber3 = (kurs / e3 - 1) * 100 * (1 if richtung == "auf" else -1)     # wie weit der Kurs noch von 3 weg ist
+            risiko, chance = abs(kurs - e3), abs(e2 - kurs)
+            noch_unter_2 = kurs < e2 if richtung == "auf" else kurs > e2
+            if 0 < ueber3 <= MAX_RUECKSETZER_PROZENT and noch_unter_2:
+                treffer.append({"art": "ruecksetzer", "richtung": "long" if richtung == "auf" else "short",
+                                "signal_index": None, "abstand": ueber3, "punkt2": e2, "punkt3": e3, "kurs": kurs,
+                                "crv": chance / risiko if risiko > 0 else None,
+                                "kette": waehle_kette(ketten, close, e3)})
     return treffer
 
 
@@ -254,6 +273,8 @@ def baue_eintrag(ticker, name, index_name, df, t):
         eintrag["tage_her"] = t["tage_her"]
     else:
         eintrag["abstand"] = round(t["abstand"], 1)
+    if t.get("crv") is not None:
+        eintrag["crv"] = round(t["crv"], 2)
     return eintrag
 
 
@@ -327,6 +348,9 @@ def zeige_tabelle(eintraege, art):
             z.update({"Signaltag": datetime.strptime(e["signaltag"], "%Y-%m-%d").strftime("%d.%m.%Y"),
                       "Tage her": e["tage_her"], "Punkt 2": e["punkt2"], "Punkt 3": e["punkt3"],
                       "Schlusskurs": e["kurs"]})
+        elif art == "ruecksetzer":
+            z.update({"Punkt 3 (Stop)": e["punkt3"], "Schlusskurs": e["kurs"], "Abstand zu 3 %": e["abstand"],
+                      "Punkt 2": e["punkt2"], "CRV": e.get("crv")})
         else:
             z.update({"Ausbruch bei": e["punkt2"], "Schlusskurs": e["kurs"], "Abstand %": e["abstand"]})
         zeilen.append(z)
@@ -428,7 +452,7 @@ def main():
 
     vol = volumen_kennzahlen(serien, indizes)
 
-    signale, setups = [], []
+    signale, setups, ruecksetzer = [], [], []
     for ticker, df in serien.items():
         try:
             treffer = pruefe_aktie(df["Close"])
@@ -439,7 +463,7 @@ def main():
         for t in treffer:
             eintrag = baue_eintrag(ticker, str(namen.get(ticker, "-")), indizes.get(ticker, "-"), df, t)
             eintrag.update(vol.get(ticker, {}))
-            (signale if t["art"] == "signal" else setups).append(eintrag)
+            {"signal": signale, "setup": setups, "ruecksetzer": ruecksetzer}[t["art"]].append(eintrag)
 
     geprueft = len(tickers) - len(ohne_daten)
     if geprueft < len(tickers) * 0.5:
@@ -465,15 +489,16 @@ def main():
 
     signale.sort(key=lambda e: (e["tage_her"], e["kuerzel"]))
     setups.sort(key=lambda e: e["abstand"])
+    ruecksetzer.sort(key=lambda e: e["abstand"])
     ergebnis = {
         "erstellt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "letzter_handelstag": ref.strftime("%Y-%m-%d") if ref is not None else None,
         "anzahl_gesamt": len(tickers), "anzahl_geprueft": geprueft,
         "einstellungen": {"N": N, "max_alter_tage": MAX_ALTER_TAGE, "max_abstand_prozent": MAX_ABSTAND_PROZENT,
-                          "volumen_tage": VOLUMEN_TAGE},
+                          "max_ruecksetzer_prozent": MAX_RUECKSETZER_PROZENT, "volumen_tage": VOLUMEN_TAGE},
         "veraltet": veraltet,
         "ohne_daten": ohne_daten,
-        "signale": signale, "setups": setups,
+        "signale": signale, "setups": setups, "ruecksetzer": ruecksetzer,
         "alle": alle,
         "eur_usd": eur_usd, "eur_usd_datum": eur_usd_datum,
     }
@@ -488,6 +513,8 @@ def main():
     zeige_tabelle(signale, "signal")
     print(f"\n=== AKTIVE SETUPS (1-2-3 steht, Ausbruch fehlt noch, höchstens {MAX_ABSTAND_PROZENT}% entfernt), nächste zuerst ===")
     zeige_tabelle(setups, "setup")
+    print(f"\n=== RÜCKSETZER im Trend (Kurs höchstens {MAX_RUECKSETZER_PROZENT}% vom letzten Punkt 3 entfernt), nächste zuerst ===")
+    zeige_tabelle(ruecksetzer, "ruecksetzer")
     if veraltet:
         print(f"\nHINWEIS: {len(veraltet)} Aktien haben einen älteren Datenstand als {ref:%d.%m.%Y}: "
               + ", ".join(veraltet[:20]) + (" ..." if len(veraltet) > 20 else ""))
