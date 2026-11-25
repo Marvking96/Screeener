@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -235,18 +236,53 @@ def kerzen_daten(df):
             "l": runde("Low"), "c": runde("Close"), "v": [int(round(float(x) / 1000)) for x in fenster["Volume"].values]}
 
 
-def schreibe_kursdateien(serien):
-    """Schreibt docs/kurse/<Kürzel>.json für jede Aktie und löscht Dateien von Aktien, die nicht mehr dabei sind."""
+def kursdatei_name(ticker):
+    return os.path.join(KURS_ORDNER, ticker.replace("/", "_") + ".json")
+
+
+def lies_kursdatei(ticker):
+    """Liest die Kerzen eines früheren Laufs aus docs/kurse/<Kürzel>.json (oder None)."""
+    try:
+        with open(kursdatei_name(ticker), encoding="utf-8") as f:
+            k = json.load(f)
+        df = pd.DataFrame({"Open": k["o"], "High": k["h"], "Low": k["l"], "Close": k["c"],
+                           "Volume": [float(x) * 1000 for x in k["v"]]},
+                          index=pd.to_datetime(k["d"]))
+        return df.astype(float)
+    except Exception:
+        return None
+
+
+def ergaenze_aus_kursdateien(serien, bis):
+    """Hängt Tage an, die ein früherer Lauf schon hatte, die Yahoo jetzt aber (noch) nicht liefert.
+    Grund: Läuft der Screener früh morgens, fehlt bei Yahoo für europäische Aktien oft der Vortag;
+    der Abendlauf nach Xetra-Schluss hat ihn aber schon gespeichert. Nur Tage bis einschließlich 'bis'."""
+    ergaenzt = 0
+    for t, s in list(serien.items()):
+        alt = lies_kursdatei(t)
+        if alt is None or not len(s):
+            continue
+        neu = alt[(alt.index > s.index[-1]) & (alt.index <= bis)]
+        if len(neu):
+            serien[t] = pd.concat([s, neu[s.columns]])
+            ergaenzt += 1
+    if ergaenzt:
+        print(f"  Aus dem vorherigen Lauf ergänzt: {ergaenzt} Aktien")
+    return ergaenzt
+
+
+def schreibe_kursdateien(serien, aufraeumen=True):
+    """Schreibt docs/kurse/<Kürzel>.json für jede Aktie und löscht (mit aufraeumen) Dateien von Aktien,
+    die nicht mehr dabei sind."""
     if not serien:
         return
     os.makedirs(KURS_ORDNER, exist_ok=True)
     namen = set()
     for ticker, df in serien.items():
-        datei = ticker.replace("/", "_") + ".json"
-        namen.add(datei)
-        with open(os.path.join(KURS_ORDNER, datei), "w", encoding="utf-8") as f:
+        namen.add(os.path.basename(kursdatei_name(ticker)))
+        with open(kursdatei_name(ticker), "w", encoding="utf-8") as f:
             json.dump(kerzen_daten(df), f, separators=(",", ":"))
-    for datei in os.listdir(KURS_ORDNER):
+    for datei in (os.listdir(KURS_ORDNER) if aufraeumen else []):
         if datei.endswith(".json") and datei not in namen:
             os.remove(os.path.join(KURS_ORDNER, datei))
     print(f"Kursdateien für {len(namen)} Aktien in {KURS_ORDNER} geschrieben")
@@ -438,9 +474,26 @@ def hole_nach(serien, ref):
     return rest
 
 
+def nur_europa(liste):
+    """Abendlauf nach Xetra-Schluss: lädt nur die europäischen Aktien und speichert ihre Kursdateien.
+    Die Ergebnisdatei bleibt unverändert (die US-Börse ist um diese Zeit noch offen)."""
+    europa = liste[liste["Index"].map(lambda i: WAEHRUNG.get(i, "EUR")) != "USD"]
+    tickers = list(europa["Kürzel"])
+    print(f"Abendlauf: {len(tickers)} europäische Aktien ...")
+    serien, ohne_daten = lade_serien(tickers)
+    heute = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    ergaenze_aus_kursdateien(serien, heute)        # nie Tage verlieren, die schon gespeichert sind
+    schreibe_kursdateien(serien, aufraeumen=False)
+    stand = Counter(s.index[-1].strftime("%d.%m.%Y") for s in serien.values())
+    print("Letzter Handelstag in den Daten:", dict(stand), f"· ohne Daten: {len(ohne_daten)}")
+
+
 def main():
     start = time.time()
     liste = pd.read_csv(LISTE, sep=";", encoding="utf-8-sig")
+    if len(sys.argv) > 1 and sys.argv[1] == "europa":
+        nur_europa(liste)
+        return
     tickers = list(liste["Kürzel"])
     namen = dict(zip(liste["Kürzel"], liste["Name"]))
     indizes = dict(zip(liste["Kürzel"], liste["Index"]))
@@ -449,6 +502,10 @@ def main():
     serien, ohne_daten = lade_serien(tickers)
     ref = referenzdatum(serien)
     veraltet = hole_nach(serien, ref) if ref is not None else []
+    if veraltet:
+        ergaenze_aus_kursdateien(serien, ref)
+        veraltet = [t for t in veraltet if serien[t].index[-1] < ref]
+        print(f"  Danach weiterhin mit älterem Datenstand: {len(veraltet)}")
 
     vol = volumen_kennzahlen(serien, indizes)
 
