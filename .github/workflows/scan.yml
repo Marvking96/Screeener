@@ -3,6 +3,7 @@ name: Screener
 on:
   schedule:
     - cron: "15 22 * * 1-5"   # Mo-Fr um 22:15 UTC, nach Börsenschluss in den USA
+    - cron: "45 17 * * 1-5"   # Mo-Fr um 17:45 UTC, nach Xetra-Schluss: speichert nur die europäischen Kurse
   workflow_dispatch:           # erlaubt den Start per Knopfdruck
 
 concurrency:                   # nie zwei Läufe gleichzeitig
@@ -31,7 +32,7 @@ jobs:
         run: python liste_erstellen.py || echo "Liste nicht aktualisiert, bestehende wird genutzt"
 
       - name: Screener ausführen
-        run: python scan_index.py
+        run: python scan_index.py ${{ github.event.schedule == '45 17 * * 1-5' && 'europa' || '' }}
 
       - name: Ergebnis speichern
         run: |
