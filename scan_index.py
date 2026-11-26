@@ -426,6 +426,24 @@ def referenzdatum(serien):
     return max(kandidaten) if kandidaten else None
 
 
+def tageskerzen_aus_stunden(ticker):
+    """Fasst die Stundenkerzen der letzten Tage je Börsentag (Ortszeit der Börse) zu Tageskerzen zusammen."""
+    st = yf.Ticker(ticker).history(period="5d", interval="60m", auto_adjust=False)
+    st = st[st["Close"].notna()]
+    if not len(st):
+        return pd.DataFrame(columns=list(FELDER))
+    idx = pd.DatetimeIndex(st.index)
+    tag = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
+    g = st.groupby(tag)
+    tage = pd.DataFrame({"Open": g["Open"].first(), "High": g["High"].max(), "Low": g["Low"].min(),
+                         "Close": g["Close"].last(), "Volume": g["Volume"].sum()})
+    for feld in ("Open", "High", "Low"):
+        tage[feld] = tage[feld].fillna(tage["Close"])
+    tage["High"] = tage[["High", "Open", "Close"]].max(axis=1)
+    tage["Low"] = tage[["Low", "Open", "Close"]].min(axis=1)
+    return tage.astype(float)
+
+
 def hole_nach(serien, ref):
     """Lädt Aktien, denen der neueste Handelstag fehlt, einzeln nach.
     Gibt die Aktien zurück, die danach immer noch einen älteren Datenstand haben."""
@@ -468,6 +486,21 @@ def hole_nach(serien, ref):
         except Exception as fehler:
             if zeigen:
                 print(f"    {t}: history fehlgeschlagen ({fehler})")
+        if serien[t].index[-1] < ref:
+            time.sleep(0.3)
+            # dritter Weg: Stundenkerzen der letzten Tage zu Tageskerzen zusammenfassen. Nach Mitternacht liefert Yahoo
+            # bei europäischen Aktien die Tageskerze des Vortags oft nicht, die Stundenkerzen aber schon.
+            # Die Näherung wird beim nächsten Lauf durch die echte Tageskerze ersetzt (dann ist der Tag nicht mehr der letzte).
+            try:
+                tage = tageskerzen_aus_stunden(t)
+                neue_tage = tage[(tage.index > serien[t].index[-1]) & (tage.index <= ref)]
+                if zeigen:
+                    print(f"    {t}: Stundenkerzen liefern bis {tage.index[-1]:%d.%m.%Y}" if len(tage) else f"    {t}: Stundenkerzen leer")
+                if len(neue_tage):
+                    serien[t] = pd.concat([serien[t], neue_tage[serien[t].columns]])
+            except Exception as fehler:
+                if zeigen:
+                    print(f"    {t}: Stundenkerzen fehlgeschlagen ({fehler})")
         time.sleep(0.3)
     rest = [t for t, s in serien.items() if s.index[-1] < ref]
     print(f"  Nachgeladen: {len(veraltet) - len(rest)}, weiterhin mit älterem Datenstand: {len(rest)}")
