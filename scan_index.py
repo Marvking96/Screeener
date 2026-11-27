@@ -262,7 +262,10 @@ def ergaenze_aus_kursdateien(serien, bis):
         alt = lies_kursdatei(t)
         if alt is None or not len(s):
             continue
-        neu = alt[(alt.index > s.index[-1]) & (alt.index <= bis)]
+        grenze = bis.get(t) if isinstance(bis, dict) else bis
+        if grenze is None:
+            continue
+        neu = alt[(alt.index > s.index[-1]) & (alt.index <= grenze)]
         if len(neu):
             serien[t] = pd.concat([s, neu[s.columns]])
             ergaenzt += 1
@@ -431,7 +434,7 @@ def tageskerzen_aus_stunden(ticker):
     st = yf.Ticker(ticker).history(period="5d", interval="60m", auto_adjust=False)
     st = st[st["Close"].notna()]
     if not len(st):
-        return pd.DataFrame(columns=list(FELDER))
+        return pd.DataFrame(columns=list(FELDER), index=pd.DatetimeIndex([]), dtype=float)
     idx = pd.DatetimeIndex(st.index)
     tag = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
     g = st.groupby(tag)
@@ -444,17 +447,42 @@ def tageskerzen_aus_stunden(ticker):
     return tage.astype(float)
 
 
-def hole_nach(serien, ref):
-    """Lädt Aktien, denen der neueste Handelstag fehlt, einzeln nach.
+def europa_aus_stunden(serien, tickers):
+    """Ergänzt bei europäischen Aktien fertige Börsentage aus Stundenkerzen, die in den Tageskerzen (noch) fehlen.
+    Nach Mitternacht fehlt bei Yahoo dort oft der Vortag. Das wird hier unabhängig von den US-Aktien geprüft,
+    damit es auch an US-Feiertagen auffällt. Der heutige Tag zählt erst nach Xetra-Schluss (17:45 Uhr)."""
+    jetzt = pd.Timestamp.now(tz="Europe/Berlin")
+    heute = jetzt.tz_localize(None).normalize()
+    grenze = heute if (jetzt.hour, jetzt.minute) >= (17, 45) else heute - pd.Timedelta(days=1)
+    ergaenzt, fehler = 0, 0
+    for t in tickers:
+        if t not in serien:
+            continue
+        try:
+            tage = tageskerzen_aus_stunden(t)
+            neu = tage[(tage.index > serien[t].index[-1]) & (tage.index <= grenze)]
+            if len(neu):
+                serien[t] = pd.concat([serien[t], neu[serien[t].columns]])
+                ergaenzt += 1
+        except Exception:
+            fehler += 1
+        time.sleep(0.2)
+    print(f"Europäische Aktien: {ergaenzt} um fehlende Tage aus Stundenkerzen ergänzt"
+          + (f", {fehler} Abrufe fehlgeschlagen" if fehler else ""))
+
+
+def hole_nach(serien, ref_von):
+    """Lädt Aktien, denen der neueste Handelstag ihres Index fehlt, einzeln nach. ref_von: Kürzel -> Handelstag.
     Gibt die Aktien zurück, die danach immer noch einen älteren Datenstand haben."""
-    veraltet = [t for t, s in serien.items() if s.index[-1] < ref]
+    veraltet = [t for t, s in serien.items() if ref_von.get(t) is not None and s.index[-1] < ref_von[t]]
     if not veraltet:
         return []
-    print(f"\n{len(veraltet)} Aktien haben nicht den neuesten Handelstag ({ref:%d.%m.%Y}).")
+    print(f"\n{len(veraltet)} Aktien haben nicht den neuesten Handelstag ihres Index.")
     if len(veraltet) > MAX_NACHLADEN:
         print("  Zu viele für einen Einzelabruf (vermutlich Feiertag an einer Börse). Sie werden markiert.")
         return veraltet
     for i, t in enumerate(veraltet):
+        ref = ref_von[t]
         zeigen = i < 3                                   # für die ersten drei steht im Protokoll, was geliefert wurde
         try:
             neu = baue_serie(lade_block([t]), t)
@@ -502,7 +530,7 @@ def hole_nach(serien, ref):
                 if zeigen:
                     print(f"    {t}: Stundenkerzen fehlgeschlagen ({fehler})")
         time.sleep(0.3)
-    rest = [t for t, s in serien.items() if s.index[-1] < ref]
+    rest = [t for t in veraltet if serien[t].index[-1] < ref_von[t]]
     print(f"  Nachgeladen: {len(veraltet) - len(rest)}, weiterhin mit älterem Datenstand: {len(rest)}")
     return rest
 
@@ -514,6 +542,7 @@ def nur_europa(liste):
     tickers = list(europa["Kürzel"])
     print(f"Abendlauf: {len(tickers)} europäische Aktien ...")
     serien, ohne_daten = lade_serien(tickers)
+    europa_aus_stunden(serien, tickers)
     heute = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
     ergaenze_aus_kursdateien(serien, heute)        # nie Tage verlieren, die schon gespeichert sind
     schreibe_kursdateien(serien, aufraeumen=False)
@@ -533,12 +562,23 @@ def main():
     print(f"{len(tickers)} Aktien in {LISTE}. Lade Kurse in Blöcken zu {BLOCK} ... (yfinance {getattr(yf, '__version__', '?')})")
 
     serien, ohne_daten = lade_serien(tickers)
-    ref = referenzdatum(serien)
-    veraltet = hole_nach(serien, ref) if ref is not None else []
+    europa_aus_stunden(serien, [t for t in tickers if WAEHRUNG.get(indizes.get(t, "-"), "EUR") != "USD"])
+    # neuester Handelstag je Index (US- und europäische Börsen haben verschiedene Feiertage)
+    refs = {}
+    for idx in sorted(set(indizes.get(t, "-") for t in serien)):
+        refs[idx] = referenzdatum({t: s for t, s in serien.items() if indizes.get(t, "-") == idx})
+    ref_von = {t: refs[indizes.get(t, "-")] for t in serien}
+    gueltig = [r for r in refs.values() if r is not None]
+    ref = max(gueltig) if gueltig else None
+    print("Neuester Handelstag je Index:", {k: (v.strftime("%d.%m.%Y") if v is not None else None) for k, v in refs.items()})
+    veraltet = hole_nach(serien, ref_von) if ref is not None else []
     if veraltet:
-        ergaenze_aus_kursdateien(serien, ref)
-        veraltet = [t for t in veraltet if serien[t].index[-1] < ref]
+        ergaenze_aus_kursdateien(serien, ref_von)
+        veraltet = [t for t in veraltet if serien[t].index[-1] < ref_von[t]]
         print(f"  Danach weiterhin mit älterem Datenstand: {len(veraltet)}")
+    # in der App markiert wird jede Aktie, deren letzter Tag älter ist als der neueste Handelstag insgesamt
+    # (z. B. US-Aktien an einem US-Feiertag oder DAX-Aktien, falls Yahoo einen Tag gar nicht liefert)
+    veraltet = [t for t, s in serien.items() if ref is not None and s.index[-1] < ref]
 
     vol = volumen_kennzahlen(serien, indizes)
 
@@ -583,6 +623,7 @@ def main():
     ergebnis = {
         "erstellt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "letzter_handelstag": ref.strftime("%Y-%m-%d") if ref is not None else None,
+        "handelstage": {k: v.strftime("%Y-%m-%d") for k, v in refs.items() if v is not None},
         "anzahl_gesamt": len(tickers), "anzahl_geprueft": geprueft,
         "einstellungen": {"N": N, "max_alter_tage": MAX_ALTER_TAGE, "max_abstand_prozent": MAX_ABSTAND_PROZENT,
                           "max_ruecksetzer_prozent": MAX_RUECKSETZER_PROZENT, "volumen_tage": VOLUMEN_TAGE},
