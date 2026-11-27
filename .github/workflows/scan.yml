@@ -18,9 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -38,7 +38,21 @@ jobs:
         run: |
           git config user.name "screener-bot"
           git config user.email "screener-bot@users.noreply.github.com"
-          git add docs/ergebnis.json docs/kurse aktien.csv
-          git diff --cached --quiet || git commit -m "Tägliches Update"
-          git pull --rebase || true
-          git push
+          # nur die Dateien, die dieser Lauf geändert hat, sichern; falls inzwischen jemand anderes gespeichert hat
+          # (zweiter Lauf, Datei-Upload), auf dessen Stand aufsetzen und nur unsere geänderten Dateien darüberlegen
+          git add -A docs/ergebnis.json docs/kurse aktien.csv
+          git diff --cached --name-only --diff-filter=AM > /tmp/geaendert.txt
+          git diff --cached --name-only --diff-filter=D > /tmp/geloescht.txt
+          if [ ! -s /tmp/geaendert.txt ] && [ ! -s /tmp/geloescht.txt ]; then echo "Keine Änderungen"; exit 0; fi
+          if [ -s /tmp/geaendert.txt ]; then tar czf /tmp/ergebnis.tgz -T /tmp/geaendert.txt; fi
+          for versuch in 1 2 3; do
+            git fetch -q origin main
+            git reset -q --hard origin/main
+            if [ -s /tmp/geaendert.txt ]; then tar xzf /tmp/ergebnis.tgz; xargs -a /tmp/geaendert.txt git add; fi
+            if [ -s /tmp/geloescht.txt ]; then xargs -a /tmp/geloescht.txt git rm -q --ignore-unmatch; fi
+            if git diff --cached --quiet; then echo "Keine Änderungen"; exit 0; fi
+            git commit -q -m "Tägliches Update"
+            if git push -q origin HEAD:main; then echo "Gespeichert"; exit 0; fi
+            echo "Speichern fehlgeschlagen, neuer Versuch ..."; sleep 5
+          done
+          exit 1
